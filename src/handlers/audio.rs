@@ -26,14 +26,12 @@ const CANDIDATE_PLAYERS: &[(&str, &[&str])] = &[
             "-autoexit",
             "-loglevel",
             "quiet",
-            "-fflags",
-            "nobuffer",
-            "-flags",
-            "low_delay",
             "-probesize",
             "32768",
             "-analyzeduration",
             "0",
+            "-sync",
+            "ext",
             "-i",
             "-",
         ],
@@ -43,8 +41,8 @@ const CANDIDATE_PLAYERS: &[(&str, &[&str])] = &[
         &[
             "--no-video",
             "--really-quiet",
-            "--profile=low-latency",
-            "--cache=no",
+            "--cache=yes",
+            "--demuxer-max-bytes=4MiB",
             "-",
         ],
     ),
@@ -347,6 +345,12 @@ impl StreamAudio {
     }
 
     pub fn set_channel(&mut self, channel: &str) {
+        if self.current_channel.eq_ignore_ascii_case(channel)
+            && self.enabled
+            && (self.streamlink_process.is_some() || self.player_process.is_some())
+        {
+            return;
+        }
         self.current_channel = channel.to_string();
         if self.enabled {
             self.play(channel);
@@ -389,6 +393,11 @@ impl StreamAudio {
         let mut streamlink_child = match Command::new("streamlink")
             .args([
                 "--twitch-low-latency",
+                "--twitch-disable-ads",
+                "--hls-live-edge",
+                "3",
+                "--stream-segment-threads",
+                "2",
                 "--default-stream",
                 "audio_only,worst",
                 "--stdout",
