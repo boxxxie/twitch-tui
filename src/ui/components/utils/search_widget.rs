@@ -4,7 +4,8 @@ use color_eyre::{Result, eyre::ContextCompat};
 use tokio::sync::mpsc::Sender;
 use tui::{
     Frame,
-    layout::Rect,
+    crossterm::event::{MouseButton, MouseEventKind},
+    layout::{Position, Rect},
     prelude::{Alignment, Margin},
     style::{Color, Modifier, Style},
     symbols::scrollbar,
@@ -52,6 +53,8 @@ where
     search_input: InputWidget<()>,
     vertical_scroll_state: ScrollbarState,
     vertical_scroll: usize,
+    last_list_rect: Option<Rect>,
+    last_input_rect: Option<Rect>,
 
     error_widget: ErrorWidget,
 }
@@ -88,6 +91,8 @@ where
             search_input,
             vertical_scroll_state: ScrollbarState::default(),
             vertical_scroll: 0,
+            last_list_rect: None,
+            last_input_rect: None,
             error_widget,
         }
     }
@@ -198,8 +203,10 @@ where
 {
     fn draw(&mut self, f: &mut Frame, area: Option<Rect>) -> Result<()> {
         let r = area.unwrap_or_else(|| popup_area(f.area(), 60, 60));
+        self.last_list_rect = Some(r);
 
         if self.error_widget.is_focused() {
+            self.last_input_rect = None;
             return self.error_widget.draw(f, Some(r));
         }
 
@@ -262,8 +269,8 @@ where
                 Style::default()
             } else {
                 Style::default()
-                    .bg(Color::LightGreen)
-                    .fg(Color::DarkGray)
+                    .bg(Color::Rgb(0x22, 0x36, 0x4D))
+                    .fg(Color::Rgb(0x38, 0xBD, 0xF8))
                     .add_modifier(Modifier::BOLD)
             });
 
@@ -307,6 +314,7 @@ where
         f.render_widget(bottom_block, rect);
 
         let input_rect = Rect::new(rect.x, rect.bottom(), rect.width, 3);
+        self.last_input_rect = Some(input_rect);
 
         self.search_input.draw(f, Some(input_rect))?;
 
@@ -314,11 +322,69 @@ where
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
-        if self.error_widget.is_focused() && matches!(event, Event::Input(Key::Esc)) {
-            self.error_widget.toggle_focus();
-            self.toggle_focus().await;
-
+        if self.error_widget.is_focused() {
+            if matches!(event, Event::Input(Key::Esc))
+                || matches!(
+                    event,
+                    Event::Mouse(m) if matches!(m.kind, MouseEventKind::Down(_))
+                )
+            {
+                self.error_widget.toggle_focus();
+                self.toggle_focus().await;
+            }
             return Ok(());
+        }
+
+        if let Event::Mouse(mouse) = event {
+            let pos = Position::new(mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    self.next()?;
+                    return Ok(());
+                }
+                MouseEventKind::ScrollUp => {
+                    self.previous();
+                    return Ok(());
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(list_rect) = self.last_list_rect {
+                        let inner = list_rect.inner(Margin {
+                            vertical: 1,
+                            horizontal: 1,
+                        });
+                        if inner.contains(pos) {
+                            let clicked_idx = self.list_state.offset()
+                                + usize::from(mouse.row.saturating_sub(inner.y));
+                            let total = self.filtered_items.as_ref().map_or_else(
+                                || self.items.as_ref().map_or(0, Vec::len),
+                                Vec::len,
+                            );
+                            if clicked_idx < total {
+                                self.list_state.select(Some(clicked_idx));
+                                self.select().await?;
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    if self.last_input_rect.is_some_and(|r| r.contains(pos)) {
+                        self.search_input.event(event).await?;
+                        return Ok(());
+                    }
+
+                    if self.last_list_rect.is_none_or(|r| !r.contains(pos)) {
+                        self.unselect();
+                        self.toggle_focus().await;
+                        return Ok(());
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.unselect();
+                    self.toggle_focus().await;
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
 
         if let Event::Input(key) = event {

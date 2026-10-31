@@ -34,24 +34,19 @@ define_style!(
 );
 
 define_style!(STATE_TABS_STYLE,
-    fg: color!(Color::Gray),
-    add_modifier: if *NO_COLOR {
-        Modifier::empty()
-    } else {
-        Modifier::DIM
-    }
+    fg: color!(Color::Rgb(0x94, 0x9C, 0xBB))
 );
 
 define_style!(TEXT_DARK_STYLE,
-    fg: color!(Color::White)
+    fg: color!(Color::Rgb(0xE0, 0xE0, 0xE0))
 );
 
-define_style!(DASHBOARD_SECTION_STYLE,
-    fg: color!(Color::LightRed)
+define_style!(BORDER_DARK_STYLE,
+    fg: color!(Color::Rgb(0x4B, 0x52, 0x78))
 );
 
 define_style!(DATETIME_DARK_STYLE,
-    fg: color!(Color::Rgb(173, 173, 184))
+    fg: color!(Color::Rgb(0x94, 0x9C, 0xBB))
 );
 
 define_style!(DATETIME_LIGHT_STYLE,
@@ -60,7 +55,7 @@ define_style!(DATETIME_LIGHT_STYLE,
 
 define_style!(HIGHLIGHT_NAME_DARK_STYLE,
     fg: color!(Color::Black),
-    bg: color!(Color::White),
+    bg: color!(Color::Rgb(0x38, 0xBD, 0xF8)),
     add_modifier: *BOLD
 );
 
@@ -71,25 +66,21 @@ define_style!(HIGHLIGHT_NAME_LIGHT_STYLE,
 );
 
 define_style!(COLUMN_TITLE_STYLE,
-    fg: color!(Color::LightCyan),
+    fg: color!(Color::Rgb(0x38, 0xBD, 0xF8)),
     add_modifier: *BOLD
 );
 
 define_style!(SYSTEM_CHAT_STYLE,
-    fg: color!(Color::Red),
+    fg: color!(Color::Rgb(0xFF, 0x6B, 0x6B)),
     add_modifier: *BOLD
 );
 
-define_style!(DASHBOARD_TITLE_COLOR_STYLE,
-    fg: color!(Color::Rgb(135, 120, 165))
-);
-
 define_style!(SEARCH_STYLE,
-    fg: color!(Color::Red),
+    fg: color!(Color::Rgb(0x38, 0xBD, 0xF8)),
     add_modifier: *BOLD
 );
 
 define_style!(TITLE_STYLE,
-    fg: color!(Color::Red),
+    fg: color!(Color::Rgb(0x4A, 0x9E, 0xFF)),
     add_modifier: *BOLD
 );

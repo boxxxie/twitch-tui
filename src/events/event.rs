@@ -1,3 +1,5 @@
+use tui::crossterm::event::MouseEvent;
+
 use crate::{
     events::key::Key,
     handlers::{data::RawMessageData, state::State},
@@ -13,6 +15,10 @@ pub enum Event {
     Tick,
     /// Crossterm events translated to internal key type events
     Input(Key),
+    /// Crossterm mouse events (clicks, scrolls, etc.) with cell coordinates
+    Mouse(MouseEvent),
+    /// Terminal window resize event
+    Resize,
     /// Events cause by user interactions
     Internal(InternalEvent),
     /// Either events to be sent to the websocket handler or notifications that come from said handler

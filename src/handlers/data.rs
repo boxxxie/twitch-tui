@@ -15,7 +15,6 @@ use crate::{
     config::{FrontendConfig, Palette, Theme},
     emotes::{DownloadedEmotes, EmoteData, SharedEmotes, display_emote, load_emote, overlay_emote},
     events::{Event, TwitchEvent, TwitchNotification},
-    ui::statics::NAME_MAX_CHARACTERS,
     utils::{
         colors::{hsl_to_rgb, u32_to_color},
         emotes::{
@@ -27,7 +26,7 @@ use crate::{
             DATETIME_DARK_STYLE, DATETIME_LIGHT_STYLE, HIGHLIGHT_NAME_DARK_STYLE,
             HIGHLIGHT_NAME_LIGHT_STYLE, SEARCH_STYLE, SYSTEM_CHAT_STYLE,
         },
-        text::split_cow_in_place,
+        text::{ format_relative_time, split_cow_in_place },
     },
 };
 
@@ -485,26 +484,57 @@ impl MessageData {
 
         // Message prefix
         let time_sent = if frontend_config.show_datetimes {
-            Some(
-                self.time_sent
-                    .format(&frontend_config.datetime_format)
-                    .to_string(),
-            )
+            if frontend_config.relative_time {
+                Some(format!(
+                    "{:>4}",
+                    format_relative_time(self.time_sent, Local::now())
+                ))
+            } else {
+                Some(
+                    self.time_sent
+                        .format(&frontend_config.datetime_format)
+                        .to_string(),
+                )
+            }
         } else {
             None
         };
 
-        let author = self.badges.as_ref().map_or_else(
+        let mut author = self.badges.as_ref().map_or_else(
             || self.author.clone(),
             |badges| badges.clone() + &self.author,
         );
 
+        const ALIGNED_USERNAME_WIDTH: usize = 18;
+        let align_usernames =
+            frontend_config.username_shown && frontend_config.right_align_usernames;
+
+        if align_usernames && author.width() > ALIGNED_USERNAME_WIDTH {
+            let truncated: String = author
+                .chars()
+                .take(ALIGNED_USERNAME_WIDTH.saturating_sub(1))
+                .collect();
+            author = format!("{truncated}…");
+        }
+
+        let pad_left = if align_usernames {
+            ALIGNED_USERNAME_WIDTH.saturating_sub(author.width())
+        } else {
+            0
+        };
+
         // Add 1 for the space after the timestamp
         let time_sent_len = time_sent.as_ref().map_or(0, |t| t.len() + 1);
 
+        let author_col_len = if align_usernames {
+            ALIGNED_USERNAME_WIDTH
+        } else {
+            author.len()
+        };
+
         let prefix_len = if frontend_config.username_shown {
             // Add 2 for the ": "
-            time_sent_len + author.len() + 2
+            time_sent_len + author_col_len + 2
         } else {
             time_sent_len
         };
@@ -513,34 +543,35 @@ impl MessageData {
         let wrap_limit = {
             // Add 1 for the border line
             let window_margin = usize::from(frontend_config.margin) + 1;
-            width - window_margin * 2
-        } - 1;
+            width.saturating_sub(window_margin * 2)
+        }
+        .saturating_sub(1)
+        .max(1);
 
         let prefix = " ".repeat(prefix_len);
-        let opts = textwrap::Options::new(wrap_limit).initial_indent(&prefix);
+        let align_continuation = align_usernames && wrap_limit > prefix_len + 8;
+        let opts = if align_continuation {
+            textwrap::Options::new(wrap_limit)
+                .initial_indent(&prefix)
+                .subsequent_indent(&prefix)
+        } else {
+            textwrap::Options::new(wrap_limit).initial_indent(&prefix)
+        };
         let wrapped_message = textwrap::wrap(&self.payload, opts);
         if wrapped_message.is_empty() {
             return vec![];
         }
         let mut lines = wrapped_message.into_iter();
 
-        let username_alignment = if frontend_config.username_shown {
-            if frontend_config.right_align_usernames {
-                NAME_MAX_CHARACTERS.saturating_sub(author.width()) + 1
-            } else {
-                1
-            }
-        } else {
-            1
-        };
-
         let mut first_row: Vec<Span<'_>> = vec![];
 
         if let Some(t) = time_sent {
             first_row.extend(vec![
                 Span::styled(t, datetime_theme),
-                Span::raw(" ".repeat(username_alignment)),
+                Span::raw(" ".repeat(1 + pad_left)),
             ]);
+        } else if pad_left > 0 {
+            first_row.push(Span::raw(" ".repeat(pad_left)));
         }
 
         if frontend_config.username_shown {
@@ -572,7 +603,7 @@ impl MessageData {
 
         let mut rows = vec![Line::from(first_row)];
 
-        rows.extend(lines.map(|line| {
+        rows.extend(lines.map(|mut line| {
             while space_idx.is_some_and(|x| x < next_index) {
                 space_idx = space_iter.next();
             }
@@ -582,14 +613,27 @@ impl MessageData {
                 space_idx = space_iter.next();
             }
 
-            Line::from(Self::build_line(
-                line,
+            let cont_line = if align_continuation {
+                split_cow_in_place(&mut line, prefix_len)
+            } else {
+                line
+            };
+
+            let mut row_spans = if align_continuation {
+                vec![Span::raw(" ".repeat(prefix_len))]
+            } else {
+                Vec::new()
+            };
+            row_spans.extend(Self::build_line(
+                cont_line,
                 &mut next_index,
                 message_theme,
                 search,
                 username,
                 &mut emotes,
-            ))
+            ));
+
+            Line::from(row_spans)
         }));
 
         rows
@@ -980,18 +1024,9 @@ mod tests {
                     Span::raw("foo")
                 ]),
                 Line::from(vec![
-                    Span::styled(
-                        "b",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    ),
-                    Span::styled(
-                        "a",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    ),
-                    Span::styled(
-                        "r",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    ),
+                    Span::styled("b", *SEARCH_STYLE),
+                    Span::styled("a", *SEARCH_STYLE),
+                    Span::styled("r", *SEARCH_STYLE),
                     Span::raw(" "),
                     Span::raw("b"),
                     Span::raw("a"),
@@ -999,5 +1034,59 @@ mod tests {
                 ])
             ]
         );
+    }
+
+    #[test]
+    fn aligned_usernames_start_messages_at_same_column() {
+        let emotes = Rc::new(Emotes::new(false));
+        let frontendconfig = FrontendConfig {
+            show_datetimes: true,
+            relative_time: true,
+            right_align_usernames: true,
+            ..FrontendConfig::default()
+        };
+
+        let short_msg = MessageData::from_twitch_message(
+            RawMessageData::builder()
+                .author("bob".to_string())
+                .maybe_user_id(None)
+                .system(false)
+                .payload("hello world".to_string())
+                .emotes(BTreeMap::new())
+                .maybe_message_id(None)
+                .highlight(false)
+                .maybe_badges(None)
+                .build(),
+            &emotes,
+        );
+        let long_msg = MessageData::from_twitch_message(
+            RawMessageData::builder()
+                .author("boxxy_queen_of_b".to_string())
+                .maybe_user_id(None)
+                .system(false)
+                .payload("hello world".to_string())
+                .emotes(BTreeMap::new())
+                .maybe_message_id(None)
+                .highlight(false)
+                .maybe_badges(None)
+                .build(),
+            &emotes,
+        );
+
+        let short_line = short_msg.to_vec(&frontendconfig, 80, None, None);
+        let long_line = long_msg.to_vec(&frontendconfig, 80, None, None);
+
+        let short_text: String = short_line[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let long_text: String = long_line[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+
+        assert_eq!(short_text.find("hello world"), long_text.find("hello world"));
     }
 }

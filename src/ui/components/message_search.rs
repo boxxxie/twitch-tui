@@ -42,6 +42,11 @@ impl MessageSearchWidget {
         self.input.is_focused()
     }
 
+    #[must_use]
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        self.input.contains(column, row)
+    }
+
     pub const fn toggle_focus(&mut self) {
         self.input.toggle_focus();
     }
@@ -59,6 +64,9 @@ impl Component for MessageSearchWidget {
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
+        if matches!(event, Event::Mouse(_)) {
+            return self.input.event(event).await;
+        }
         if let Event::Input(key) = event {
             match key {
                 Key::Esc => {

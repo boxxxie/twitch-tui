@@ -8,7 +8,8 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, info};
 use tui::{
     Frame,
-    layout::Rect,
+    crossterm::event::{MouseButton, MouseEventKind},
+    layout::{Position, Rect},
     prelude::{Alignment, Margin},
     style::{Color, Modifier, Style},
     symbols::scrollbar,
@@ -47,6 +48,8 @@ pub struct ChannelSwitcherWidget {
     filtered_channels: Option<Vec<String>>,
     vertical_scroll_state: ScrollbarState,
     vertical_scroll: usize,
+    last_list_rect: Option<Rect>,
+    last_input_rect: Option<Rect>,
 }
 
 impl ChannelSwitcherWidget {
@@ -89,6 +92,8 @@ impl ChannelSwitcherWidget {
             filtered_channels: None,
             vertical_scroll_state: ScrollbarState::default(),
             vertical_scroll: 0,
+            last_list_rect: None,
+            last_input_rect: None,
         }
     }
 
@@ -97,8 +102,8 @@ impl ChannelSwitcherWidget {
             Some(i) => {
                 let items = self.storage.borrow().get("channels")?;
 
-                if i >= items.len() - 1 {
-                    items.len() - 1
+                if i >= items.len().saturating_sub(1) {
+                    items.len().saturating_sub(1)
                 } else {
                     i + 1
                 }
@@ -234,6 +239,7 @@ impl Display for ChannelSwitcherWidget {
 impl Component for ChannelSwitcherWidget {
     fn draw(&mut self, f: &mut Frame, area: Option<Rect>) -> Result<()> {
         let r = area.unwrap_or_else(|| popup_area(f.area(), 60, 60));
+        self.last_list_rect = Some(r);
 
         let channels = self.storage.borrow().get("channels")?;
 
@@ -289,7 +295,8 @@ impl Component for ChannelSwitcherWidget {
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::LightGreen)
+                    .bg(Color::Rgb(0x22, 0x36, 0x4D))
+                    .fg(Color::Rgb(0x38, 0xBD, 0xF8))
                     .add_modifier(Modifier::BOLD),
             );
 
@@ -333,6 +340,7 @@ impl Component for ChannelSwitcherWidget {
         f.render_widget(bottom_block, rect);
 
         let input_rect = Rect::new(r.x, r.bottom(), r.width, 3);
+        self.last_input_rect = Some(input_rect);
 
         self.search_input.draw(f, Some(input_rect))?;
 
@@ -340,6 +348,59 @@ impl Component for ChannelSwitcherWidget {
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
+        if let Event::Mouse(mouse) = event {
+            let pos = Position::new(mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    self.next()?;
+                    return Ok(());
+                }
+                MouseEventKind::ScrollUp => {
+                    self.previous();
+                    return Ok(());
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(list_rect) = self.last_list_rect {
+                        let inner = list_rect.inner(Margin {
+                            vertical: 1,
+                            horizontal: 1,
+                        });
+                        if inner.contains(pos) {
+                            let clicked_idx = self.list_state.offset()
+                                + usize::from(mouse.row.saturating_sub(inner.y));
+                            let total = self.filtered_channels.as_ref().map_or_else(
+                                || self.storage.borrow().get("channels").map_or(0, |v| v.len()),
+                                Vec::len,
+                            );
+                            if clicked_idx < total {
+                                self.list_state.select(Some(clicked_idx));
+                                self.join_channel().await?;
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    if self.last_input_rect.is_some_and(|r| r.contains(pos)) {
+                        self.search_input.event(event).await?;
+                        return Ok(());
+                    }
+
+                    if self.last_list_rect.is_none_or(|r| !r.contains(pos)) {
+                        self.unselect();
+                        self.toggle_focus();
+                        self.search_input.clear();
+                        return Ok(());
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.unselect();
+                    self.toggle_focus();
+                    self.search_input.clear();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         if let Event::Input(key) = event {
             let keybinds = &self.config.keybinds.selection;
             match key {

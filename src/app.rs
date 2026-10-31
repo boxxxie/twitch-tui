@@ -28,8 +28,11 @@ use crate::{
     },
     events::{Event, Events, InternalEvent, TwitchAction, TwitchEvent, TwitchNotification},
     handlers::{
+        audio::{SharedAudio, StreamAudio},
         data::{KNOWN_CHATTERS, MessageData},
+        duckdb::{DuckDbStore, SharedDuckDb},
         filters::Filters,
+        sidebar::{SharedSidebar, SidebarState, is_channel_live},
         state::State,
         storage::{SharedStorage, Storage},
     },
@@ -58,6 +61,18 @@ pub struct App {
 
     /// Data loaded in from a JSON file.
     pub storage: SharedStorage,
+
+    /// Persistent `DuckDB` message and event store.
+    pub duckdb: SharedDuckDb,
+
+    /// Background stream audio via streamlink.
+    pub audio: SharedAudio,
+
+    /// Vertical sidebar state (stream metadata & followed channels).
+    pub sidebar: SharedSidebar,
+
+    /// Current active channel name for `DuckDB` logging.
+    current_channel: String,
 
     /// States
     state: State,
@@ -93,20 +108,70 @@ impl App {
         let first_state = config.terminal.first_state.clone();
 
         let storage = shared!(Storage::new(&config)?);
+        let duckdb = shared!(DuckDbStore::default());
         let filters = shared!(Filters::new(&config));
-        let messages = shared!(VecDeque::with_capacity(maximum_messages));
+        let audio = shared!(StreamAudio::new(&config));
+        let sidebar = shared!(SidebarState::new(&config));
+        let initial_channel = storage
+            .borrow()
+            .last_channel()
+            .unwrap_or_else(|| clean_channel_name(&config.twitch.channel));
+        let initial_messages = duckdb
+            .borrow()
+            .load_channel_messages(&initial_channel, maximum_messages);
+        let messages = shared!(initial_messages);
 
-        let components = Components::builder()
+        {
+            let mut tracked = config.frontend.favorite_channels.clone();
+            if let Ok(chans) = storage.borrow().get("channels") {
+                tracked.extend(chans);
+            }
+            tracked.extend(duckdb.borrow().known_channels());
+            sidebar
+                .borrow_mut()
+                .maybe_refresh(&initial_channel, tracked, &twitch_oauth, true);
+        }
+
+        let mut components = Components::builder()
             .config(&config)
             .twitch_oauth(twitch_oauth.clone())
-            .event_tx(event_tx)
+            .event_tx(event_tx.clone())
             .storage(storage.clone())
             .filters(filters)
+            .audio(audio.clone())
+            .sidebar(sidebar.clone())
             .messages(messages.clone())
             .emotes(&emotes)
             .build();
 
-        let emotes_rx = query_emotes(&config, twitch_oauth.clone(), config.twitch.channel.clone());
+        components
+            .chat
+            .current_channel_name
+            .clone_from(&initial_channel);
+        components.state_tabs.select(&first_state);
+
+        if first_state == State::Normal {
+            if config.frontend.audio {
+                audio.borrow_mut().play(&initial_channel);
+            }
+            let _ = twitch_tx.try_send(TwitchAction::JoinChannel(initial_channel.clone()));
+        } else {
+            // Auto-resume the last active channel if it is currently live on Twitch
+            let oauth_clone = twitch_oauth.clone();
+            let candidate = initial_channel.clone();
+            let tx_clone = event_tx;
+            tokio::spawn(async move {
+                if is_channel_live(&oauth_clone, &candidate).await {
+                    let _ = tx_clone
+                        .send(Event::Twitch(TwitchEvent::Action(
+                            TwitchAction::JoinChannel(candidate),
+                        )))
+                        .await;
+                }
+            });
+        }
+
+        let emotes_rx = query_emotes(&config, twitch_oauth.clone(), initial_channel.clone());
 
         Ok(Self {
             running: true,
@@ -117,6 +182,10 @@ impl App {
             twitch_tx,
             messages,
             storage,
+            duckdb,
+            audio,
+            sidebar,
+            current_channel: initial_channel,
             state: first_state,
             previous_state: None,
             emotes,
@@ -162,6 +231,11 @@ impl App {
 
     fn cleanup(&mut self) -> Result<()> {
         self.close_current_stream()?;
+        self.audio.borrow_mut().stop();
+        self.duckdb.borrow_mut().shutdown();
+        self.storage
+            .borrow_mut()
+            .set_last_channel(&self.current_channel);
         self.storage.borrow().dump_data()?;
         self.emotes.unload();
 
@@ -215,21 +289,34 @@ impl App {
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         let is_emotes_enabled = self.emotes.enabled;
+        let mut needs_redraw = true;
+        let mut last_periodic_redraw = std::time::Instant::now();
 
         while self.running {
-            if is_emotes_enabled {
-                self.handle_emote_event();
+            if needs_redraw {
+                let mut draw_result = Ok(());
+                terminal.draw(|f| {
+                    draw_result = self.draw(f, Some(f.area()));
+                })?;
+                draw_result?;
+                needs_redraw = false;
+                last_periodic_redraw = std::time::Instant::now();
             }
 
             if let Some(event) = self.events.next().await {
-                self.event(&event).await?;
+                if self.handle_event(&event).await? {
+                    needs_redraw = true;
+                }
             }
 
-            let mut draw_result = Ok(());
-            terminal.draw(|f| {
-                draw_result = self.draw(f, Some(f.area()));
-            })?;
-            draw_result?;
+            if is_emotes_enabled && self.handle_emote_event() {
+                needs_redraw = true;
+            }
+
+            // Refresh relative time labels ("Xm ago") and header clock at least every 5s
+            if last_periodic_redraw.elapsed() >= std::time::Duration::from_secs(5) {
+                needs_redraw = true;
+            }
         }
 
         self.cleanup()?;
@@ -237,7 +324,8 @@ impl App {
         Ok(())
     }
 
-    fn handle_emote_event(&mut self) {
+    fn handle_emote_event(&mut self) -> bool {
+        let mut changed = false;
         // Check if we have received any emotes
         if let Ok((user_emotes, global_emotes)) = self.emotes_rx.try_recv() {
             *self.emotes.user_emotes.borrow_mut() = user_emotes;
@@ -246,11 +334,13 @@ impl App {
             for message in &mut *self.messages.borrow_mut() {
                 message.reparse_emotes(&self.emotes);
             }
+            changed = true;
         }
 
         // Check if we need to load a decoded emote
         if let Some(rx) = &mut self.decoded_emotes_rx {
-            if let Ok(r) = rx.try_recv() {
+            while let Ok(r) = rx.try_recv() {
+                changed = true;
                 match r {
                     Ok(d) => {
                         if let Err(e) = d.apply() {
@@ -268,6 +358,8 @@ impl App {
                 }
             }
         }
+
+        changed
     }
 
     fn handle_internal_event(&mut self, internal_event: &InternalEvent) -> Result<()> {
@@ -281,10 +373,6 @@ impl App {
                 }
             }
             InternalEvent::SwitchState(state) => {
-                if self.state == State::Normal {
-                    self.clear_messages();
-                }
-
                 self.set_state(state.clone());
             }
             InternalEvent::OpenStream(channel) => {
@@ -300,8 +388,24 @@ impl App {
         match twitch_action {
             TwitchAction::JoinChannel(channel) => {
                 let channel = clean_channel_name(channel);
-                self.clear_messages();
+                self.current_channel.clone_from(&channel);
+                self.storage.borrow_mut().set_last_channel(&channel);
+                let restored = self
+                    .duckdb
+                    .borrow()
+                    .load_channel_messages(&channel, self.config.terminal.maximum_messages);
+                self.messages.replace(restored);
+                self.components.chat.scroll_offset.jump_to(0);
                 self.emotes.unload();
+
+                self.duckdb.borrow().record_event(
+                    &channel,
+                    "join_channel",
+                    Some(&self.config.twitch.username),
+                    None,
+                    None,
+                    &channel,
+                );
 
                 self.twitch_tx
                     .send(TwitchAction::JoinChannel(channel.clone()))
@@ -310,10 +414,32 @@ impl App {
                 if self.config.frontend.autostart_view_command {
                     self.open_stream(&channel)?;
                 }
+                self.audio.borrow_mut().set_channel(&channel);
+                {
+                    let mut tracked = self.config.frontend.favorite_channels.clone();
+                    if let Ok(chans) = self.storage.borrow().get("channels") {
+                        tracked.extend(chans);
+                    }
+                    tracked.extend(self.duckdb.borrow().known_channels());
+                    self.sidebar.borrow_mut().maybe_refresh(
+                        &channel,
+                        tracked,
+                        &self.twitch_oauth,
+                        true,
+                    );
+                }
                 self.emotes_rx = query_emotes(&self.config, self.twitch_oauth.clone(), channel);
                 self.set_state(State::Normal);
             }
             TwitchAction::Message(message) => {
+                self.duckdb.borrow().record_event(
+                    &self.current_channel,
+                    "send_message",
+                    Some(&self.config.twitch.username),
+                    None,
+                    None,
+                    message,
+                );
                 self.twitch_tx
                     .send(TwitchAction::Message(message.clone()))
                     .await?;
@@ -341,6 +467,11 @@ impl App {
                             message_data.author
                         ))?;
                 }
+                self.duckdb.borrow_mut().record_message(
+                    &self.current_channel,
+                    &message_data,
+                    self.config.terminal.maximum_messages,
+                );
                 self.messages.borrow_mut().push_front(message_data);
 
                 // If scrolling is enabled, pad for more messages.
@@ -349,6 +480,14 @@ impl App {
                 }
             }
             TwitchNotification::ClearChat(user_id) => {
+                self.duckdb.borrow().record_event(
+                    &self.current_channel,
+                    "clear_chat",
+                    None,
+                    user_id.as_deref(),
+                    None,
+                    "clear_chat",
+                );
                 if let Some(user) = user_id {
                     self.purge_user_messages(user.as_str());
                 } else {
@@ -356,6 +495,14 @@ impl App {
                 }
             }
             TwitchNotification::DeleteMessage(message_id) => {
+                self.duckdb.borrow().record_event(
+                    &self.current_channel,
+                    "delete_message",
+                    None,
+                    None,
+                    Some(message_id.as_str()),
+                    "delete_message",
+                );
                 self.remove_message_with(message_id.as_str())?;
             }
         }
@@ -408,6 +555,15 @@ impl Component for App {
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
+        let _ = self.handle_event(event).await?;
+        Ok(())
+    }
+}
+
+impl App {
+    async fn handle_event(&mut self, event: &Event) -> Result<bool> {
+        let mut should_redraw = !matches!(event, Event::Tick);
+
         match event {
             Event::Internal(internal_event) => {
                 self.handle_internal_event(internal_event)?;
@@ -422,20 +578,63 @@ impl Component for App {
             },
             Event::Input(key) => {
                 if self.components.debug.is_focused() {
-                    return self.components.debug.event(event).await;
+                    self.components.debug.event(event).await?;
+                    return Ok(true);
                 }
 
                 if self.config.keybinds.toggle_debug_focus.contains(key) {
                     self.components.debug.toggle_focus();
                 }
             }
-            Event::Tick => {}
+            Event::Mouse(mouse) => {
+                if self.config.frontend.state_tabs
+                    && matches!(
+                        mouse.kind,
+                        tui::crossterm::event::MouseEventKind::Down(
+                            tui::crossterm::event::MouseButton::Left
+                        )
+                    )
+                {
+                    if let Some(state) = self
+                        .components
+                        .state_tabs
+                        .clicked_state(mouse.column, mouse.row)
+                    {
+                        self.set_state(state);
+                        return Ok(true);
+                    }
+                }
+            }
+            Event::Resize => {
+                return Ok(true);
+            }
+            Event::Tick => {
+                if self.audio.borrow_mut().poll_status() {
+                    should_redraw = true;
+                }
+                let mut sb = self.sidebar.borrow_mut();
+                if sb.poll_updates() {
+                    should_redraw = true;
+                }
+                if sb.is_refresh_needed(&self.current_channel, false) {
+                    let mut tracked = self.config.frontend.favorite_channels.clone();
+                    if let Ok(chans) = self.storage.borrow().get("channels") {
+                        tracked.extend(chans);
+                    }
+                    tracked.extend(self.duckdb.borrow().known_channels());
+                    if sb.maybe_refresh(&self.current_channel, tracked, &self.twitch_oauth, false) {
+                        should_redraw = true;
+                    }
+                }
+            }
         }
 
         match self.state {
-            State::Dashboard => self.components.dashboard.event(event).await,
-            State::Normal => self.components.chat.event(event).await,
-            State::Help => self.components.help.event(event).await,
+            State::Dashboard => self.components.dashboard.event(event).await?,
+            State::Normal => self.components.chat.event(event).await?,
+            State::Help => self.components.help.event(event).await?,
         }
+
+        Ok(should_redraw)
     }
 }

@@ -1,8 +1,13 @@
 use std::{borrow::Cow, string::FromUtf8Error, sync::LazyLock};
 
+use chrono::{DateTime, Local};
 use memchr::memmem::Finder;
 use rustyline::line_buffer::LineBuffer;
-use tui::{style::Style, text::Span};
+use tui::{
+    layout::Rect,
+    style::Style,
+    text::{Line, Span},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -43,10 +48,33 @@ pub enum TitleStyle<'a> {
 }
 
 pub fn title_line<'a>(contents: &'a [TitleStyle<'a>], style: Style) -> Vec<Span<'a>> {
+    title_line_with_rects(contents, style, 0, 0).0
+}
+
+pub fn title_line_with_rects<'a>(
+    contents: &'a [TitleStyle<'a>],
+    style: Style,
+    start_x: u16,
+    y: u16,
+) -> (Vec<Span<'a>>, Vec<Rect>) {
     let mut complete = Vec::new();
+    let mut rects = Vec::with_capacity(contents.len());
+    let mut x = start_x;
 
     for (i, item) in contents.iter().enumerate() {
+        if i > 0 {
+            x = x.saturating_add(1);
+        }
         let first_bracket = Span::raw(format!("{}[ ", if i == 0 { "" } else { " " }));
+
+        let inner_width = match item {
+            TitleStyle::Combined(title, value) => title.width() + 2 + value.width(),
+            TitleStyle::Single(value) => value.width(),
+            TitleStyle::Custom(span) => span.width(),
+        };
+        let pill_width = u16::try_from(inner_width.saturating_add(4)).unwrap_or(u16::MAX);
+        rects.push(Rect::new(x, y, pill_width, 1));
+        x = x.saturating_add(pill_width);
 
         complete.extend(match item {
             TitleStyle::Combined(title, value) => vec![
@@ -63,7 +91,7 @@ pub fn title_line<'a>(contents: &'a [TitleStyle<'a>], style: Style) -> Vec<Span<
         });
     }
 
-    complete
+    (complete, rects)
 }
 
 /// Within an array of strings, find the first partial or full match, if any.
@@ -164,6 +192,51 @@ pub fn clean_message(msg: &str) -> Result<String, FromUtf8Error> {
 
     // Unwrapping here is safe as the input is already valid utf8, and we only remove `U_E0000` from the string.
     String::from_utf8(output)
+}
+
+/// Formats `date` relative to `now` using compact `glim`-style notation
+/// (`"now"`, `"30s"`, `"5m"`, `"1h"`, `"1.5h"`, or `"31 Oct"` for >= 24h).
+#[must_use]
+pub fn format_relative_time(date: DateTime<Local>, now: DateTime<Local>) -> String {
+    let secs = now.signed_duration_since(date).num_seconds();
+    if secs < 10 {
+        return "now".to_string();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    if secs < 86_400 {
+        let half_hours = ((secs as f64) / 1800.0).round() as u32;
+        let half_hours = half_hours.clamp(2, 47);
+        return if half_hours % 2 == 0 {
+            format!("{}h", half_hours / 2)
+        } else {
+            format!("{}.5h", half_hours / 2)
+        };
+    }
+    date.format("%d %b").to_string()
+}
+
+/// Builds a horizontal divider line grouping chat messages into `group_minutes` intervals.
+#[must_use]
+pub fn format_time_divider_line(
+    bucket_time: DateTime<Local>,
+    now: DateTime<Local>,
+    width: usize,
+    style: Style,
+) -> Line<'static> {
+    let rel = format_relative_time(bucket_time, now);
+    let clock = bucket_time.format("%H:%M").to_string();
+    let label = format!(" {rel} · {clock} ");
+    let prefix = "───";
+    let used = prefix.width() + label.width();
+    let trailing_len = width.saturating_sub(used + 2);
+    let trailing = "─".repeat(trailing_len);
+    Line::from(vec![Span::styled(format!("{prefix}{label}{trailing}"), style)])
 }
 
 #[cfg(test)]
@@ -301,5 +374,26 @@ mod tests {
 
         assert_eq!(output, "foobar  baz");
         assert!(highlight);
+    }
+
+    #[test]
+    fn test_format_relative_time_glim_style() {
+        let now = Local::now();
+        assert_eq!(
+            format_relative_time(now - chrono::TimeDelta::seconds(3), now),
+            "now"
+        );
+        assert_eq!(
+            format_relative_time(now - chrono::TimeDelta::seconds(42), now),
+            "42s"
+        );
+        assert_eq!(
+            format_relative_time(now - chrono::TimeDelta::minutes(5), now),
+            "5m"
+        );
+        assert_eq!(
+            format_relative_time(now - chrono::TimeDelta::minutes(90), now),
+            "1.5h"
+        );
     }
 }

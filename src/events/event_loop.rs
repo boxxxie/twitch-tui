@@ -1,10 +1,7 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use color_eyre::{Result, eyre::Context};
-use tokio::{
-    sync::mpsc::{Receiver, Sender},
-    time::Instant,
-};
+use color_eyre::Result;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tui::crossterm::event::{
     self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
     MouseEventKind,
@@ -18,9 +15,14 @@ pub struct Events {
 
 impl Events {
     pub fn new(delay: u64, tx: Sender<Event>, rx: Receiver<Event>) -> Self {
-        let tick_rate = Duration::from_millis(delay);
+        let tick_rate = Duration::from_millis(delay.max(250));
         let actor = EventsThread::new(tx, tick_rate);
-        tokio::task::spawn(async move { actor.run().await });
+        std::thread::Builder::new()
+            .name("twt-events".to_string())
+            .spawn(move || {
+                let _ = actor.run();
+            })
+            .ok();
 
         Self { rx }
     }
@@ -40,7 +42,7 @@ impl EventsThread {
         Self { tx, tick_rate }
     }
 
-    async fn run(&self) -> Result<()> {
+    fn run(&self) -> Result<()> {
         let mut last_tick = Instant::now();
 
         loop {
@@ -56,20 +58,25 @@ impl EventsThread {
                         kind: KeyEventKind::Press,
                         modifiers,
                         state: _,
-                    })) => self.translate_key_event(code, modifiers).await?,
-                    Ok(CEvent::Mouse(key)) => self.translate_mouse_event(key).await?,
+                    })) => self.translate_key_event(code, modifiers)?,
+                    Ok(CEvent::Mouse(key)) => self.translate_mouse_event(key)?,
+                    Ok(CEvent::Resize(_, _)) => self.send(Event::Resize)?,
                     _ => (),
                 }
             }
 
             if last_tick.elapsed() >= self.tick_rate {
-                self.tx.send(Event::Tick).await?;
+                if self.tx.blocking_send(Event::Tick).is_err() {
+                    break;
+                }
                 last_tick = Instant::now();
             }
         }
+
+        Ok(())
     }
 
-    async fn translate_key_event(&self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    fn translate_key_event(&self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         let key = match code {
             KeyCode::Backspace => Key::Backspace,
             KeyCode::Esc => Key::Esc,
@@ -92,24 +99,24 @@ impl EventsThread {
             _ => return Ok(()),
         };
 
-        self.send(Event::Input(key)).await?;
+        self.send(Event::Input(key))?;
 
         Ok(())
     }
 
-    async fn translate_mouse_event(&self, key: MouseEvent) -> Result<()> {
-        let key = match key.kind {
-            MouseEventKind::ScrollDown => Key::ScrollDown,
-            MouseEventKind::ScrollUp => Key::ScrollUp,
-            _ => return Ok(()),
-        };
-
-        self.send(Event::Input(key)).await?;
+    fn translate_mouse_event(&self, mouse: MouseEvent) -> Result<()> {
+        match mouse.kind {
+            MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                self.send(Event::Mouse(mouse))?;
+            }
+            _ => (),
+        }
 
         Ok(())
     }
 
-    async fn send(&self, event: Event) -> Result<()> {
-        self.tx.send(event).await.context("Failed to send event")
+    fn send(&self, event: Event) -> Result<()> {
+        let _ = self.tx.blocking_send(event);
+        Ok(())
     }
 }

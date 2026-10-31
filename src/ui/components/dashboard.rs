@@ -1,42 +1,48 @@
-use std::slice::Iter;
-
-use color_eyre::{
-    Result,
-    eyre::{Context, ContextCompat},
-};
+use chrono::Utc;
+use color_eyre::Result;
 use tokio::sync::mpsc::Sender;
 use tui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    crossterm::event::{MouseButton, MouseEventKind},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     config::SharedCoreConfig,
     events::{Event, InternalEvent, Key, TwitchAction, TwitchEvent, get_keybind_text},
-    handlers::{state::State, storage::SharedStorage},
+    handlers::{
+        sidebar::{SharedSidebar, StreamMetadata},
+        state::State,
+        storage::SharedStorage,
+    },
     twitch::oauth::TwitchOauth,
     ui::components::{ChannelSwitcherWidget, Component, FollowingWidget},
-    utils::styles::{DASHBOARD_SECTION_STYLE, DASHBOARD_TITLE_COLOR_STYLE, TEXT_DARK_STYLE},
+    utils::{
+        styles::{BORDER_DARK_STYLE, NO_COLOR, TEXT_DARK_STYLE, TITLE_STYLE},
+        text::{TitleStyle, title_line},
+    },
 };
-
-const DASHBOARD_TITLE: [&str; 5] = [
-    "   __           _ __       __          __        _ ",
-    "  / /__      __(_) /______/ /_        / /___  __(_)",
-    " / __/ | /| / / / __/ ___/ __ \\______/ __/ / / / / ",
-    "/ /_ | |/ |/ / / /_/ /__/ / / /_____/ /_/ /_/ / /  ",
-    "\\__/ |__/|__/_/\\__/\\___/_/ /_/      \\__/\\__,_/_/   ",
-];
 
 pub struct DashboardWidget {
     config: SharedCoreConfig,
     event_tx: Sender<Event>,
     storage: SharedStorage,
+    sidebar: SharedSidebar,
     channel_input: ChannelSwitcherWidget,
     following: FollowingWidget,
-    channel_selection: Option<u32>,
+    selected_idx: usize,
+    scroll_offset: usize,
+    card_scroll_offset: usize,
+    sidebar_hitboxes: Vec<(Rect, String)>,
+    card_hitboxes: Vec<(Rect, String)>,
+    chip_hitboxes: Vec<(Rect, String)>,
+    action_rects: Vec<Rect>,
+    sidebar_area: Option<Rect>,
+    grid_area: Option<Rect>,
 }
 
 impl DashboardWidget {
@@ -45,6 +51,7 @@ impl DashboardWidget {
         twitch_oauth: TwitchOauth,
         event_tx: Sender<Event>,
         storage: SharedStorage,
+        sidebar: SharedSidebar,
     ) -> Self {
         let channel_input =
             ChannelSwitcherWidget::new(config.clone(), event_tx.clone(), storage.clone());
@@ -54,223 +61,810 @@ impl DashboardWidget {
             config,
             event_tx,
             storage,
+            sidebar,
             channel_input,
             following,
-            channel_selection: None,
+            selected_idx: 0,
+            scroll_offset: 0,
+            card_scroll_offset: 0,
+            sidebar_hitboxes: Vec::new(),
+            card_hitboxes: Vec::new(),
+            chip_hitboxes: Vec::new(),
+            action_rects: Vec::new(),
+            sidebar_area: None,
+            grid_area: None,
         }
     }
 
-    fn create_interactive_list_widget<'a>(
-        &'a self,
-        items: &'a [String],
-        index_offset: usize,
-    ) -> List<'a> {
-        let selection = self
-            .channel_selection
-            .map_or(String::new(), |selection| selection.to_string());
-        List::new(items.iter().enumerate().map(|(i, s)| {
-            let index_offset_str = (i + index_offset).to_string();
-            let selection_offset = if index_offset_str.starts_with(&selection) {
-                selection.len()
-            } else {
-                0
-            };
-            ListItem::new(Line::from(vec![
-                Span::raw("["),
-                Span::styled(
-                    index_offset_str
-                        .get(0..selection_offset)
-                        .unwrap_or_default()
-                        .to_string(),
-                    Style::default().fg(Color::Red).bold(),
-                ),
-                Span::styled(
-                    index_offset_str
-                        .get(selection_offset..)
-                        .unwrap_or_default()
-                        .to_string(),
-                    Style::default().fg(Color::LightMagenta),
-                ),
-                Span::raw("] "),
-                Span::raw(s),
-            ]))
-        }))
-        .style(*TEXT_DARK_STYLE)
-        .highlight_style(Style::default().add_modifier(Modifier::ITALIC))
-    }
+    fn all_selectable_channels(&self) -> Vec<String> {
+        let snap = &self.sidebar.borrow().snapshot;
+        let mut out: Vec<String> = snap
+            .live_channels
+            .iter()
+            .map(|s| s.user_login.clone())
+            .collect();
 
-    fn render_dashboard_title_widget(frame: &mut Frame, chunk: Rect) {
-        let w = Paragraph::new(
-            DASHBOARD_TITLE
-                .iter()
-                .map(|&s| Line::from(vec![Span::raw(s)]))
-                .collect::<Vec<Line>>(),
-        )
-        .style(*DASHBOARD_TITLE_COLOR_STYLE);
-
-        frame.render_widget(w, chunk);
-    }
-
-    fn render_channel_selection_widget(
-        &self,
-        frame: &mut Frame,
-        v_chunks: &mut Iter<Rect>,
-        current_channel: String,
-        default_channels: &[String],
-    ) -> Result<()> {
-        // use try_from_fn once it's stable with #![feature(array_try_from_fn)]
-        // let [
-        //     selected_title_chunk,
-        //     selected_content_chunk,
-        //     favorite_title_chunk,
-        //     favorite_content_chunk,
-        //     recent_title_chunk,
-        //     recent_content_chunk,
-        // ] = std::array::try_from_fn(|_| {
-        //     v_chunks
-        //         .next()
-        //         .context("Failed to get all dashboard vertical chunks for channel selection")
-        // })?;
-
-        let mut next_chunk = || {
-            v_chunks
-                .next()
-                .context("Failed to get next dashboard vertical chunk for channel selection")
-        };
-        let selected_title_chunk = next_chunk()?;
-        let selected_content_chunk = next_chunk()?;
-        let favorite_title_chunk = next_chunk()?;
-        let favorite_content_chunk = next_chunk()?;
-        let recent_title_chunk = next_chunk()?;
-        let recent_content_chunk = next_chunk()?;
-
-        frame.render_widget(
-            Paragraph::new("Currently selected channel").style(*DASHBOARD_SECTION_STYLE),
-            *selected_title_chunk,
-        );
-
-        let current_channel_selection = Paragraph::new(Line::from(vec![
-            Span::raw("["),
-            Span::styled(
-                get_keybind_text(&self.config.keybinds.dashboard.join),
-                Style::default().fg(Color::LightMagenta),
-            ),
-            Span::raw("] "),
-            Span::raw(current_channel),
-        ]));
-
-        frame.render_widget(current_channel_selection, *selected_content_chunk);
-
-        frame.render_widget(
-            Paragraph::new("Favorite channels").style(*DASHBOARD_SECTION_STYLE),
-            *favorite_title_chunk,
-        );
-
-        if default_channels.is_empty() {
-            frame.render_widget(Paragraph::new("None"), *favorite_content_chunk);
-        } else {
-            let default_channels_widget = self.create_interactive_list_widget(default_channels, 0);
-
-            frame.render_widget(default_channels_widget, *favorite_content_chunk);
+        for fav in &self.config.frontend.favorite_channels {
+            let clean = fav.trim().trim_start_matches('#').to_lowercase();
+            if !clean.is_empty() && !out.iter().any(|c| c.eq_ignore_ascii_case(&clean)) {
+                out.push(clean);
+            }
         }
 
-        frame.render_widget(
-            Paragraph::new("Most recent channels").style(*DASHBOARD_SECTION_STYLE),
-            *recent_title_chunk,
-        );
-
-        let recent_channels = self
-            .storage
-            .borrow()
-            .get_last_n("channels", 5, true)
-            .context("Failed to get recent channels")?;
-
-        if recent_channels.is_empty() {
-            frame.render_widget(Paragraph::new("None"), *recent_content_chunk);
-        } else {
-            let recent_channels_widget =
-                self.create_interactive_list_widget(&recent_channels, default_channels.len());
-
-            frame.render_widget(recent_channels_widget, *recent_content_chunk);
+        if let Ok(recents) = self.storage.borrow().get_last_n("channels", 8, true) {
+            for r in recents {
+                let clean = r.trim().trim_start_matches('#').to_lowercase();
+                if !clean.is_empty() && !out.iter().any(|c| c.eq_ignore_ascii_case(&clean)) {
+                    out.push(clean);
+                }
+            }
         }
 
+        for off in &snap.offline_channels {
+            if !out.iter().any(|c| c.eq_ignore_ascii_case(off)) {
+                out.push(off.clone());
+            }
+        }
+
+        if out.is_empty() {
+            let last = self
+                .storage
+                .borrow()
+                .last_channel()
+                .unwrap_or_else(|| self.config.twitch.channel.clone());
+            out.push(last);
+        }
+
+        out
+    }
+
+    async fn join_channel(&self, channel: &str) -> Result<()> {
+        let clean = channel.trim().trim_start_matches('#').to_string();
+        if clean.is_empty() {
+            return Ok(());
+        }
+        self.storage.borrow_mut().set_last_channel(&clean);
+        self.event_tx
+            .send(Event::Twitch(TwitchEvent::Action(
+                TwitchAction::JoinChannel(clean),
+            )))
+            .await?;
         Ok(())
     }
 
-    fn render_quit_selection_widget(&self, frame: &mut Frame, chunk: Rect) {
-        let spans = vec![
-            Span::raw("["),
-            Span::styled(
-                get_keybind_text(&self.config.keybinds.dashboard.quit),
-                Style::default().fg(Color::LightMagenta),
+    fn draw_top_navbar(&mut self, f: &mut Frame, area: Rect) {
+        let purple = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xA9, 0x70, 0xFF)
+        };
+        let text_primary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xEE, 0xF2, 0xFF)
+        };
+        let text_secondary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x94, 0x9C, 0xBB)
+        };
+        let green = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x50, 0xC8, 0x78)
+        };
+        let amber = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xF5, 0x9E, 0x0B)
+        };
+
+        let last_chan = self
+            .storage
+            .borrow()
+            .last_channel()
+            .unwrap_or_else(|| self.config.twitch.channel.clone());
+        let is_last_live = self
+            .sidebar
+            .borrow()
+            .snapshot
+            .live_channels
+            .iter()
+            .any(|s| s.user_login.eq_ignore_ascii_case(&last_chan));
+
+        let keybinds = &self.config.keybinds.dashboard;
+        let actions = [
+            (
+                get_keybind_text(&keybinds.followed_channels_search),
+                "Following",
             ),
-            Span::raw("] "),
-            Span::raw("Quit"),
+            (get_keybind_text(&keybinds.recent_channels_search), "Search"),
+            (get_keybind_text(&keybinds.help), "Help"),
+            (get_keybind_text(&keybinds.quit), "Quit"),
         ];
 
-        let quit_option = Paragraph::new(Line::from(spans));
+        self.action_rects.clear();
+        let mut spans = vec![
+            Span::styled(
+                " 🟣 TWITCH ",
+                Style::default().fg(purple).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Browse  ",
+                Style::default()
+                    .fg(text_primary)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
+            Span::styled("│ ", Style::default().fg(text_secondary)),
+            Span::styled("Last watched: ", Style::default().fg(text_secondary)),
+            Span::styled(
+                format!("#{last_chan} "),
+                Style::default()
+                    .fg(text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            if is_last_live {
+                Span::styled(
+                    "● LIVE ",
+                    Style::default().fg(green).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "○ OFFLINE (Select a live channel below) ",
+                    Style::default().fg(amber),
+                )
+            },
+            Span::styled("│ ", Style::default().fg(text_secondary)),
+        ];
 
-        frame.render_widget(quit_option, chunk);
+        let mut x = area.x.saturating_add(
+            u16::try_from(
+                spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum::<usize>(),
+            )
+            .unwrap_or(45)
+            .saturating_add(1),
+        );
+        let row_y = area.y.saturating_add(1);
+
+        for (i, (key_txt, label)) in actions.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+                x = x.saturating_add(2);
+            }
+            let pill_str = format!("[{key_txt}] {label}");
+            let w = u16::try_from(UnicodeWidthStr::width(pill_str.as_str())).unwrap_or(10);
+            if x.saturating_add(w) < area.right() {
+                self.action_rects.push(Rect::new(x, row_y, w, 1));
+            }
+            x = x.saturating_add(w);
+            spans.push(Span::styled("[", Style::default().fg(text_secondary)));
+            spans.push(Span::styled(
+                key_txt.clone(),
+                Style::default().fg(purple).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled("] ", Style::default().fg(text_secondary)));
+            spans.push(Span::styled(*label, Style::default().fg(text_primary)));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.config.frontend.border_type.clone().into())
+            .border_style(*BORDER_DARK_STYLE);
+
+        let nav = Paragraph::new(Line::from(spans)).block(block);
+        f.render_widget(nav, area);
     }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Renders the left Twitch-style Followed Channels directory with live and offline sections"
+    )]
+    fn draw_left_sidebar(&mut self, f: &mut Frame, area: Rect, all_channels: &[String]) {
+        self.sidebar_area = Some(area);
+        self.sidebar_hitboxes.clear();
+
+        let snap = self.sidebar.borrow().snapshot.clone();
+        let live_count = snap.live_channels.len();
+        let total_followed = live_count + snap.offline_channels.len();
+
+        let title_str = format!("{live_count} live / {total_followed}");
+        let header_spans = [
+            TitleStyle::Combined("FOLLOWED CHANNELS", &title_str),
+            TitleStyle::Single("Click or Enter"),
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.config.frontend.border_type.clone().into())
+            .border_style(*BORDER_DARK_STYLE)
+            .title(Line::from(title_line(&header_spans, *TITLE_STYLE)))
+            .style(*TEXT_DARK_STYLE);
+
+        let inner_w = usize::from(area.width.saturating_sub(3)).max(12);
+        let max_rows = usize::from(area.height.saturating_sub(2));
+        let inner_x = area.x.saturating_add(1);
+        let mut cur_y = area.y.saturating_add(1);
+        let max_inner_y = area.bottom().saturating_sub(1);
+
+        let red = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xF8, 0x71, 0x71)
+        };
+        let purple = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xC4, 0xB5, 0xFD)
+        };
+        let text_primary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xEE, 0xF2, 0xFF)
+        };
+        let text_secondary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x94, 0x9C, 0xBB)
+        };
+        let text_muted = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x64, 0x6A, 0x86)
+        };
+        let highlight_bg = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x23, 0x27, 0x38)
+        };
+
+        let selected_channel = all_channels.get(self.selected_idx).cloned();
+
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut row_budget = max_rows;
+
+        if snap.live_channels.is_empty() && snap.offline_channels.is_empty() {
+            items.push(ListItem::new(Line::from(vec![Span::styled(
+                " Loading followed channels...",
+                Style::default().fg(text_secondary),
+            )])));
+        } else {
+            for stream in snap.live_channels.iter().skip(self.scroll_offset) {
+                if row_budget < 2 {
+                    break;
+                }
+                let is_selected = selected_channel
+                    .as_ref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&stream.user_login));
+
+                let viewers = stream.viewers_compact();
+                let name_budget = inner_w.saturating_sub(viewers.len() + 5).max(6);
+                let name = truncate_str(&stream.user_name, name_budget);
+                let pad = inner_w
+                    .saturating_sub(UnicodeWidthStr::width(name.as_str()) + viewers.len() + 3)
+                    .max(1);
+
+                let row_style = if is_selected {
+                    Style::default().bg(highlight_bg)
+                } else {
+                    Style::default()
+                };
+
+                let line1 = Line::from(vec![
+                    Span::styled(
+                        if is_selected { "▸" } else { " " },
+                        Style::default().fg(purple).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("● ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        name,
+                        Style::default()
+                            .fg(if is_selected { purple } else { text_primary })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(viewers, Style::default().fg(red)),
+                ]);
+
+                let game = if stream.game_name.is_empty() {
+                    "Just Chatting"
+                } else {
+                    stream.game_name.as_str()
+                };
+                let line2 = Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        truncate_str(game, inner_w.saturating_sub(3)),
+                        Style::default().fg(text_secondary),
+                    ),
+                ]);
+
+                if cur_y < max_inner_y {
+                    let h = 2.min(max_inner_y.saturating_sub(cur_y));
+                    self.sidebar_hitboxes.push((
+                        Rect::new(inner_x, cur_y, area.width.saturating_sub(2), h),
+                        stream.user_login.clone(),
+                    ));
+                    cur_y = cur_y.saturating_add(h);
+                }
+
+                items.push(ListItem::new(vec![line1, line2]).style(row_style));
+                row_budget = row_budget.saturating_sub(2);
+            }
+
+            let skip_offline = self.scroll_offset.saturating_sub(snap.live_channels.len());
+            if row_budget >= 2 && !snap.offline_channels.is_empty() {
+                if skip_offline == 0 {
+                    items.push(ListItem::new(Line::from(vec![Span::styled(
+                        format!(" ── OFFLINE ({}) ──", snap.offline_channels.len()),
+                        Style::default().fg(text_muted),
+                    )])));
+                    cur_y = cur_y.saturating_add(1);
+                    row_budget = row_budget.saturating_sub(1);
+                }
+
+                for off in snap.offline_channels.iter().skip(skip_offline) {
+                    if row_budget == 0 {
+                        break;
+                    }
+                    let is_selected = selected_channel
+                        .as_ref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(off));
+                    let row_style = if is_selected {
+                        Style::default().bg(highlight_bg)
+                    } else {
+                        Style::default()
+                    };
+
+                    if cur_y < max_inner_y {
+                        self.sidebar_hitboxes.push((
+                            Rect::new(inner_x, cur_y, area.width.saturating_sub(2), 1),
+                            off.clone(),
+                        ));
+                        cur_y = cur_y.saturating_add(1);
+                    }
+
+                    items.push(
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                if is_selected { "▸" } else { " " },
+                                Style::default().fg(purple).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled("○ ", Style::default().fg(text_muted)),
+                            Span::styled(
+                                truncate_str(off, inner_w.saturating_sub(3)),
+                                Style::default().fg(if is_selected {
+                                    text_primary
+                                } else {
+                                    text_secondary
+                                }),
+                            ),
+                        ]))
+                        .style(row_style),
+                    );
+                    row_budget = row_budget.saturating_sub(1);
+                }
+            }
+        }
+
+        f.render_widget(List::new(items).block(block), area);
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Renders the Twitch homepage live stream card grid + quick-resume chips"
+    )]
+    fn draw_main_content(&mut self, f: &mut Frame, area: Rect, all_channels: &[String]) {
+        self.grid_area = Some(area);
+        self.card_hitboxes.clear();
+        self.chip_hitboxes.clear();
+
+        let snap = self.sidebar.borrow().snapshot.clone();
+        let selected_channel = all_channels.get(self.selected_idx).cloned();
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(6)])
+            .split(area);
+
+        let live_area = chunks.first().copied().unwrap_or(area);
+        let bottom_area = chunks.get(1).copied().unwrap_or_default();
+
+        let live_header = [
+            TitleStyle::Combined("LIVE CHANNELS WE THINK YOU'LL LIKE", &snap.live_channels.len().to_string()),
+            TitleStyle::Single("↑/↓/←/→ or Click Card to Watch"),
+        ];
+        let live_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.config.frontend.border_type.clone().into())
+            .border_style(*BORDER_DARK_STYLE)
+            .title(Line::from(title_line(&live_header, *TITLE_STYLE)));
+
+        let inner_live = live_block.inner(live_area);
+        f.render_widget(live_block, live_area);
+
+        let text_secondary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x94, 0x9C, 0xBB)
+        };
+
+        if snap.live_channels.is_empty() {
+            let empty_msg = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  No followed channels are currently live (or still fetching from Twitch API...).",
+                    Style::default().fg(text_secondary),
+                )),
+                Line::from(Span::styled(
+                    "  Select any channel from the left sidebar, Favorites/Recent below, or press [s] / [f] to search.",
+                    Style::default().fg(text_secondary),
+                )),
+            ]);
+            f.render_widget(empty_msg, inner_live);
+        } else {
+            let cols = if inner_live.width >= 108 {
+                3usize
+            } else if inner_live.width >= 68 {
+                2usize
+            } else {
+                1usize
+            };
+            let card_h = 6u16;
+            let rows_visible = usize::from(inner_live.height / card_h).max(1);
+            let col_constraints: Vec<Constraint> = (0..cols)
+                .map(|_| Constraint::Ratio(1, u32::try_from(cols).unwrap_or(1)))
+                .collect();
+
+            let now = Utc::now();
+            let start_row = self.card_scroll_offset;
+
+            for row_idx in 0..rows_visible {
+                let y = inner_live
+                    .y
+                    .saturating_add(u16::try_from(row_idx).unwrap_or(0).saturating_mul(card_h));
+                if y.saturating_add(card_h) > inner_live.bottom() {
+                    break;
+                }
+                let row_rect = Rect::new(inner_live.x, y, inner_live.width, card_h);
+                let col_rects = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(col_constraints.clone())
+                    .split(row_rect);
+
+                for col_idx in 0..cols {
+                    let stream_idx = (start_row + row_idx) * cols + col_idx;
+                    let Some(stream) = snap.live_channels.get(stream_idx) else {
+                        break;
+                    };
+                    let Some(&card_rect) = col_rects.get(col_idx) else {
+                        continue;
+                    };
+
+                    let is_selected = selected_channel
+                        .as_ref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(&stream.user_login));
+
+                    self.card_hitboxes
+                        .push((card_rect, stream.user_login.clone()));
+                    self.draw_stream_card(
+                        f,
+                        card_rect,
+                        stream,
+                        stream_idx + 1,
+                        is_selected,
+                        now,
+                    );
+                }
+            }
+        }
+
+        // Bottom quick-access bar: Favorites & Recent Channels
+        self.draw_quick_channels_bar(f, bottom_area, selected_channel.as_deref());
+    }
+
+    fn draw_stream_card(
+        &self,
+        f: &mut Frame,
+        rect: Rect,
+        stream: &StreamMetadata,
+        badge_num: usize,
+        is_selected: bool,
+        now: chrono::DateTime<Utc>,
+    ) {
+        let red = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xF8, 0x71, 0x71)
+        };
+        let purple = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xA9, 0x70, 0xFF)
+        };
+        let cyan = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x38, 0xBD, 0xF8)
+        };
+        let text_primary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xEE, 0xF2, 0xFF)
+        };
+        let text_secondary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x94, 0x9C, 0xBB)
+        };
+        let tag_fg = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xC4, 0xB5, 0xFD)
+        };
+
+        let border_style = if is_selected {
+            Style::default().fg(purple).add_modifier(Modifier::BOLD)
+        } else {
+            *BORDER_DARK_STYLE
+        };
+
+        let uptime = stream.uptime_text(now);
+        let right_meta = if uptime.is_empty() {
+            format!(" ♥ {} ", stream.viewers_compact())
+        } else {
+            format!(" ♥ {} · {} ", stream.viewers_compact(), uptime)
+        };
+
+        let card_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.config.frontend.border_type.clone().into())
+            .border_style(border_style)
+            .title(Line::from(vec![
+                Span::styled(
+                    format!(" [{badge_num}] "),
+                    Style::default().fg(purple).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("● LIVE ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    stream.user_name.clone(),
+                    Style::default()
+                        .fg(text_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]))
+            .title_bottom(Line::from(Span::styled(right_meta, Style::default().fg(red))).alignment(Alignment::Right));
+
+        let inner_w = usize::from(rect.width.saturating_sub(3)).max(10);
+        let game = if stream.game_name.is_empty() {
+            "Just Chatting"
+        } else {
+            stream.game_name.as_str()
+        };
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    truncate_str(game, inner_w),
+                    Style::default().fg(cyan).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    truncate_str(&stream.title, inner_w),
+                    Style::default().fg(text_primary),
+                ),
+            ]),
+        ];
+
+        if !stream.tags.is_empty() {
+            let mut tag_spans = vec![Span::raw(" ")];
+            let mut used = 1usize;
+            for tag in stream.tags.iter().take(4) {
+                let chip = format!("[{tag}] ");
+                if used + chip.len() > inner_w {
+                    break;
+                }
+                used += chip.len();
+                tag_spans.push(Span::styled(chip, Style::default().fg(tag_fg)));
+            }
+            lines.push(Line::from(tag_spans));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!(" twitch.tv/{}", stream.user_login),
+                Style::default().fg(text_secondary),
+            )));
+        }
+
+        let para = Paragraph::new(lines)
+            .block(card_block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, rect);
+    }
+
+    fn draw_quick_channels_bar(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        selected_channel: Option<&str>,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+
+        let purple = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xA9, 0x70, 0xFF)
+        };
+        let green = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x50, 0xC8, 0x78)
+        };
+        let text_primary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0xEE, 0xF2, 0xFF)
+        };
+        let text_secondary = if *NO_COLOR {
+            Color::Reset
+        } else {
+            Color::Rgb(0x94, 0x9C, 0xBB)
+        };
+
+        let header = [
+            TitleStyle::Single("RECENT & FAVORITE CHANNELS"),
+            TitleStyle::Single("Click any chip to open chat"),
+        ];
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.config.frontend.border_type.clone().into())
+            .border_style(*BORDER_DARK_STYLE)
+            .title(Line::from(title_line(&header, *TITLE_STYLE)));
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let snap = &self.sidebar.borrow().snapshot;
+        let favorites = self.config.frontend.favorite_channels.clone();
+        let recents = self
+            .storage
+            .borrow()
+            .get_last_n("channels", 8, true)
+            .unwrap_or_default();
+
+        let mut combined: Vec<(String, bool)> = Vec::new();
+        for ch in &favorites {
+            let clean = ch.trim().trim_start_matches('#').to_lowercase();
+            if !clean.is_empty() && !combined.iter().any(|(c, _)| c == &clean) {
+                combined.push((clean, true));
+            }
+        }
+        for ch in &recents {
+            let clean = ch.trim().trim_start_matches('#').to_lowercase();
+            if !clean.is_empty() && !combined.iter().any(|(c, _)| c == &clean) {
+                combined.push((clean, false));
+            }
+        }
+
+        let mut row1_spans = vec![Span::raw(" ")];
+        let mut row2_spans = vec![Span::raw(" ")];
+        let mut x1 = inner.x.saturating_add(1);
+        let mut x2 = inner.x.saturating_add(1);
+        let y1 = inner.y;
+        let y2 = inner.y.saturating_add(2.min(inner.height.saturating_sub(1)));
+
+        for (ch, is_fav) in combined {
+            let is_live = snap
+                .live_channels
+                .iter()
+                .any(|s| s.user_login.eq_ignore_ascii_case(&ch));
+            let is_sel = selected_channel.is_some_and(|s| s.eq_ignore_ascii_case(&ch));
+
+            let prefix = if is_fav { "★ " } else { "" };
+            let dot = if is_live { "● " } else { "○ " };
+            let label = format!(" {prefix}{dot}{ch} ");
+            let w = u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(8);
+
+            let chip_style = if is_sel {
+                Style::default()
+                    .fg(purple)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else if is_live {
+                Style::default().fg(green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(text_primary)
+            };
+
+            if x1.saturating_add(w + 2) < inner.right() {
+                self.chip_hitboxes.push((Rect::new(x1, y1, w, 1), ch));
+                row1_spans.push(Span::styled(label, chip_style));
+                row1_spans.push(Span::styled("  ", Style::default().fg(text_secondary)));
+                x1 = x1.saturating_add(w + 2);
+            } else if inner.height >= 3 && x2.saturating_add(w + 2) < inner.right() {
+                self.chip_hitboxes.push((Rect::new(x2, y2, w, 1), ch));
+                row2_spans.push(Span::styled(label, chip_style));
+                row2_spans.push(Span::styled("  ", Style::default().fg(text_secondary)));
+                x2 = x2.saturating_add(w + 2);
+            }
+        }
+
+        let lines = if inner.height >= 3 {
+            vec![
+                Line::from(row1_spans),
+                Line::from(""),
+                Line::from(row2_spans),
+            ]
+        } else {
+            vec![Line::from(row1_spans)]
+        };
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+fn truncate_str(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw + 1 > max_width {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out
 }
 
 impl Component for DashboardWidget {
     fn draw(&mut self, f: &mut Frame, area: Option<Rect>) -> Result<()> {
         let r = area.unwrap_or_else(|| f.area());
+        f.render_widget(Clear, r);
 
-        let favorite_channels_len = {
-            let l = self.config.frontend.favorite_channels.len() as u16;
+        let all_channels = self.all_selectable_channels();
+        if self.selected_idx >= all_channels.len() && !all_channels.is_empty() {
+            self.selected_idx = all_channels.len() - 1;
+        }
 
-            if l == 0 { 2 } else { l + 1 }
-        };
-
-        let recent_channels_len = {
-            let current_len = self.storage.borrow().get("channels")?.len() as u16;
-            let recent_channel_config_count = self.config.frontend.recent_channel_count;
-
-            if current_len == 0 {
-                2
-            } else if current_len <= recent_channel_config_count {
-                current_len + 1
-            } else {
-                recent_channel_config_count + 1
-            }
-        };
-
-        let v_chunk_binding = Layout::default()
+        let v_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                // Twitch-tui ASCII logo
-                Constraint::Length(DASHBOARD_TITLE.len() as u16 + 2),
-                // Currently selected channel title, content
-                Constraint::Length(2),
-                Constraint::Length(2),
-                // Favorite channels title, content
-                Constraint::Length(2),
-                Constraint::Length(favorite_channels_len),
-                // Recent channel title, content
-                Constraint::Length(2),
-                Constraint::Length(recent_channels_len),
-                // Quit
-                Constraint::Length(1),
-            ])
-            .margin(2)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
             .split(r);
 
-        let mut v_chunks = v_chunk_binding.iter();
+        if let Some(&nav_rect) = v_chunks.first() {
+            self.draw_top_navbar(f, nav_rect);
+        }
 
-        let title_chunk = v_chunks.next().context("Failed to get title chunk")?;
-        Self::render_dashboard_title_widget(f, *title_chunk);
-
-        self.render_channel_selection_widget(
-            f,
-            &mut v_chunks,
-            self.config.twitch.channel.clone(),
-            &self.config.frontend.favorite_channels.clone(),
-        )?;
-
-        let quit_chunk = v_chunks.next().context("Failed to get quit chunk")?;
-        self.render_quit_selection_widget(f, *quit_chunk);
+        if let Some(&body_rect) = v_chunks.get(1) {
+            if body_rect.width >= 76 {
+                let h_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(34), Constraint::Min(40)])
+                    .split(body_rect);
+                if let Some(&left_rect) = h_chunks.first() {
+                    self.draw_left_sidebar(f, left_rect, &all_channels);
+                }
+                if let Some(&right_rect) = h_chunks.get(1) {
+                    self.draw_main_content(f, right_rect, &all_channels);
+                }
+            } else {
+                self.draw_main_content(f, body_rect, &all_channels);
+            }
+        }
 
         if self.channel_input.is_focused() {
             self.channel_input.draw(f, None)?;
@@ -281,14 +875,82 @@ impl Component for DashboardWidget {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Handles mouse clicks, scroll wheel, and keyboard navigation across the Twitch home screen"
+    )]
     async fn event(&mut self, event: &Event) -> Result<()> {
-        if let Event::Input(key) = event {
-            if self.channel_input.is_focused() {
-                return self.channel_input.event(event).await;
-            } else if self.following.is_focused() {
-                return self.following.event(event).await;
-            }
+        if self.channel_input.is_focused() {
+            return self.channel_input.event(event).await;
+        } else if self.following.is_focused() {
+            return self.following.event(event).await;
+        }
 
+        let all_channels = self.all_selectable_channels();
+
+        if let Event::Mouse(mouse) = event {
+            let pos = Position::new(mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if self.sidebar_area.is_some_and(|r| r.contains(pos)) {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(2);
+                    } else if self.grid_area.is_some_and(|r| r.contains(pos)) {
+                        self.card_scroll_offset = self.card_scroll_offset.saturating_sub(1);
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::ScrollDown => {
+                    if self.sidebar_area.is_some_and(|r| r.contains(pos)) {
+                        self.scroll_offset = self.scroll_offset.saturating_add(2);
+                    } else if self.grid_area.is_some_and(|r| r.contains(pos)) {
+                        self.card_scroll_offset = self.card_scroll_offset.saturating_add(1);
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    for (rect, channel) in self
+                        .card_hitboxes
+                        .iter()
+                        .chain(self.sidebar_hitboxes.iter())
+                        .chain(self.chip_hitboxes.iter())
+                    {
+                        if rect.contains(pos) {
+                            let target = channel.clone();
+                            self.join_channel(&target).await?;
+                            return Ok(());
+                        }
+                    }
+
+                    if let Some((idx, _)) = self
+                        .action_rects
+                        .iter()
+                        .enumerate()
+                        .find(|(_, r)| r.contains(pos))
+                    {
+                        match idx {
+                            0 => self.following.toggle_focus().await,
+                            1 => self.channel_input.toggle_focus(),
+                            2 => {
+                                self.event_tx
+                                    .send(Event::Internal(InternalEvent::SwitchState(State::Help)))
+                                    .await?;
+                            }
+                            3 => {
+                                self.event_tx
+                                    .send(Event::Internal(InternalEvent::Quit))
+                                    .await?;
+                            }
+                            _ => {}
+                        }
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if let Event::Input(key) = event {
             let keybinds = &self.config.keybinds.dashboard;
             match key {
                 key if keybinds.quit.contains(key) => {
@@ -302,56 +964,59 @@ impl Component for DashboardWidget {
                 key if keybinds.followed_channels_search.contains(key) => {
                     self.following.toggle_focus().await;
                 }
-                key if keybinds.join.contains(key) => {
-                    let configured_channel = self.config.twitch.channel.clone();
-                    self.event_tx
-                        .send(Event::Twitch(TwitchEvent::Action(
-                            TwitchAction::JoinChannel(configured_channel),
-                        )))
-                        .await?;
-                }
                 key if keybinds.help.contains(key) => {
                     self.event_tx
                         .send(Event::Internal(InternalEvent::SwitchState(State::Help)))
                         .await?;
                 }
+                Key::Down | Key::Char('j') | Key::Tab => {
+                    if !all_channels.is_empty() {
+                        self.selected_idx = (self.selected_idx + 1) % all_channels.len();
+                    }
+                }
+                Key::Up | Key::Char('k') => {
+                    if !all_channels.is_empty() {
+                        self.selected_idx = if self.selected_idx == 0 {
+                            all_channels.len() - 1
+                        } else {
+                            self.selected_idx - 1
+                        };
+                    }
+                }
+                Key::Right | Key::Char('l') => {
+                    if !all_channels.is_empty() {
+                        self.selected_idx = (self.selected_idx + 1) % all_channels.len();
+                    }
+                }
+                Key::Left | Key::Char('h') => {
+                    if !all_channels.is_empty() {
+                        self.selected_idx = if self.selected_idx == 0 {
+                            all_channels.len() - 1
+                        } else {
+                            self.selected_idx - 1
+                        };
+                    }
+                }
+                key if keybinds.join.contains(key) => {
+                    if let Some(ch) = all_channels.get(self.selected_idx).cloned() {
+                        self.join_channel(&ch).await?;
+                    } else {
+                        let fallback = self
+                            .storage
+                            .borrow()
+                            .last_channel()
+                            .unwrap_or_else(|| self.config.twitch.channel.clone());
+                        self.join_channel(&fallback).await?;
+                    }
+                }
                 Key::Char(c) => {
                     if let Some(digit) = c.to_digit(10) {
-                        let mut channels = self.config.frontend.favorite_channels.clone();
-                        let mut selected_channels = self.storage.borrow().get("channels")?;
-                        selected_channels.reverse();
-
-                        channels.extend(selected_channels);
-
-                        let selection =
-                            if let Some(favorites_selection) = self.channel_selection.as_mut() {
-                                *favorites_selection = *favorites_selection * 10 + digit;
-                                *favorites_selection
-                            } else {
-                                self.channel_selection = Some(digit);
-                                digit
-                            } as usize;
-
-                        if let Some(channel) = channels.get(selection) {
-                            self.storage
-                                .borrow_mut()
-                                .add("channels", channel.clone())
-                                .context(format!("Failed to add channel {channel} to storage"))?;
-
-                            if selection != 0 && selection * 10 <= channels.len() {
-                                return Ok(());
+                        if digit >= 1 {
+                            let idx = (digit as usize) - 1;
+                            if let Some(ch) = all_channels.get(idx).cloned() {
+                                self.join_channel(&ch).await?;
                             }
-
-                            self.channel_selection = None;
-                            self.event_tx
-                                .send(Event::Twitch(TwitchEvent::Action(
-                                    TwitchAction::JoinChannel(channel.clone()),
-                                )))
-                                .await?;
-
-                            return Ok(());
                         }
-                        self.channel_selection = None;
                     }
                 }
                 _ => {}

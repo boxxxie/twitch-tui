@@ -7,7 +7,9 @@ use crate::{
     config::SharedCoreConfig,
     emotes::SharedEmotes,
     events::Event,
-    handlers::{filters::SharedFilters, storage::SharedStorage},
+    handlers::{
+        audio::SharedAudio, filters::SharedFilters, sidebar::SharedSidebar, storage::SharedStorage,
+    },
     twitch::oauth::TwitchOauth,
     ui::components::{
         ChatWidget, DashboardWidget, DebugWidget, ErrorWidget, HelpWidget, StateTabsWidget,
@@ -52,6 +54,8 @@ impl Components {
         event_tx: Sender<Event>,
         storage: SharedStorage,
         filters: SharedFilters,
+        audio: SharedAudio,
+        sidebar: SharedSidebar,
         messages: SharedMessages,
         emotes: &SharedEmotes,
     ) -> Self {
@@ -74,12 +78,15 @@ impl Components {
                 &storage,
                 emotes,
                 filters,
+                audio,
+                sidebar.clone(),
             ),
             dashboard: DashboardWidget::new(
                 config.clone(),
                 twitch_oauth,
                 event_tx.clone(),
                 storage,
+                sidebar,
             ),
             help: HelpWidget::new(config.clone(), event_tx),
             window_size_error,

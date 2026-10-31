@@ -9,6 +9,7 @@ use rustyline::{
 use tokio::sync::mpsc::Sender;
 use tui::{
     Frame,
+    crossterm::event::{MouseButton, MouseEventKind},
     layout::{Position as LayoutPosition, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -54,6 +55,7 @@ pub struct InputWidget<T: Clone> {
     visual_indicator: Option<VisualValidator>,
     input_suggester: Option<(T, InputSuggester<T>)>,
     suggestion: Option<String>,
+    last_area: Option<Rect>,
 }
 
 #[bon]
@@ -78,7 +80,14 @@ impl<T: Clone> InputWidget<T> {
             visual_indicator,
             input_suggester,
             suggestion: None,
+            last_area: None,
         }
+    }
+
+    #[must_use]
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        self.last_area
+            .is_some_and(|r| r.contains(LayoutPosition::new(column, row)))
     }
 
     pub fn clear(&mut self) {
@@ -126,6 +135,7 @@ impl<T: Clone> Display for InputWidget<T> {
 impl<T: Clone> Component for InputWidget<T> {
     fn draw(&mut self, f: &mut Frame, area: Option<Rect>) -> Result<()> {
         let r = area.map_or_else(|| popup_area(f.area(), 60, 60), |a| a.clamp(f.area()));
+        self.last_area = Some(r);
 
         let cursor_pos = get_cursor_position(&self.input);
 
@@ -220,6 +230,29 @@ impl<T: Clone> Component for InputWidget<T> {
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
+        if let Event::Mouse(mouse) = event {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(r) = self.last_area {
+                    if r.contains(LayoutPosition::new(mouse.column, mouse.row)) {
+                        let rel_x = usize::from(mouse.column.saturating_sub(r.x.saturating_add(1)));
+                        let char_len = self.input.as_str().chars().count();
+                        if rel_x > char_len && self.suggestion.is_some() {
+                            self.accept_suggestion();
+                            self.input.move_end();
+                        } else {
+                            let byte_pos = self
+                                .input
+                                .as_str()
+                                .char_indices()
+                                .nth(rel_x)
+                                .map_or_else(|| self.input.len(), |(idx, _)| idx);
+                            self.input.set_pos(byte_pos);
+                        }
+                    }
+                }
+            }
+        }
+
         if let Event::Input(key) = event {
             let keybinds = &self.config.keybinds.insert;
             match key {

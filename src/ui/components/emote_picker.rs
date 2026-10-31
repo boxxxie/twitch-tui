@@ -6,7 +6,8 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, warn};
 use tui::{
     Frame,
-    layout::Rect,
+    crossterm::event::{MouseButton, MouseEventKind},
+    layout::{Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState},
@@ -38,6 +39,8 @@ pub struct EmotePickerWidget {
     search_theme: Style,
     list_state: ListState,
     filtered_emotes: Vec<String>,
+    last_list_rect: Option<Rect>,
+    last_input_rect: Option<Rect>,
 }
 
 impl EmotePickerWidget {
@@ -76,14 +79,16 @@ impl EmotePickerWidget {
             search_theme: *SEARCH_STYLE,
             list_state: ListState::default(),
             filtered_emotes: vec![],
+            last_list_rect: None,
+            last_input_rect: None,
         }
     }
 
     fn next(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
-                if i >= self.filtered_emotes.len() - 1 {
-                    self.filtered_emotes.len() - 1
+                if i >= self.filtered_emotes.len().saturating_sub(1) {
+                    self.filtered_emotes.len().saturating_sub(1)
                 } else {
                     i + 1
                 }
@@ -123,6 +128,7 @@ impl Component for EmotePickerWidget {
     )]
     fn draw(&mut self, f: &mut Frame, area: Option<Rect>) -> Result<()> {
         let r = area.unwrap_or_else(|| popup_area(f.area(), 60, 60));
+        self.last_list_rect = Some(r);
 
         // Only load the emotes that are actually being displayed, as loading every emote is not really possible.
         // Some channels can have multiple thousands emotes and decoding all of them takes a while.
@@ -234,7 +240,8 @@ impl Component for EmotePickerWidget {
                 Style::default()
             } else {
                 Style::default()
-                    .bg(Color::LightGreen)
+                    .bg(Color::Rgb(0x22, 0x36, 0x4D))
+                    .fg(Color::Rgb(0x38, 0xBD, 0xF8))
                     .add_modifier(Modifier::BOLD)
             });
 
@@ -250,6 +257,7 @@ impl Component for EmotePickerWidget {
         f.render_widget(bottom_block, rect);
 
         let input_rect = Rect::new(r.x, r.bottom(), r.width, 3);
+        self.last_input_rect = Some(input_rect);
 
         self.input.draw(f, Some(input_rect))?;
 
@@ -257,6 +265,56 @@ impl Component for EmotePickerWidget {
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
+        if let Event::Mouse(mouse) = event {
+            let pos = Position::new(mouse.column, mouse.row);
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    self.next();
+                    return Ok(());
+                }
+                MouseEventKind::ScrollUp => {
+                    self.previous();
+                    return Ok(());
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(list_rect) = self.last_list_rect {
+                        let inner = list_rect.inner(Margin {
+                            vertical: 1,
+                            horizontal: 1,
+                        });
+                        if inner.contains(pos) {
+                            let clicked_idx = self.list_state.offset()
+                                + usize::from(mouse.row.saturating_sub(inner.y));
+                            if let Some(emote) = self.filtered_emotes.get(clicked_idx).cloned() {
+                                self.toggle_focus();
+                                self.input.clear();
+                                self.unselect();
+                                self.filtered_emotes.clear();
+                                self.event_tx
+                                    .send(Event::Internal(InternalEvent::SelectEmote(emote)))
+                                    .await?;
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    if self.last_input_rect.is_some_and(|r| r.contains(pos)) {
+                        self.input.event(event).await?;
+                        return Ok(());
+                    }
+
+                    if self.last_list_rect.is_none_or(|r| !r.contains(pos)) {
+                        self.toggle_focus();
+                        return Ok(());
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.toggle_focus();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         if let Event::Input(key) = event {
             let keybinds = &self.config.keybinds.selection;
             match key {

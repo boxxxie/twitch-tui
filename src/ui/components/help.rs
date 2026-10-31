@@ -2,6 +2,7 @@ use color_eyre::Result;
 use tokio::sync::mpsc::Sender;
 use tui::{
     Frame,
+    crossterm::event::MouseEventKind,
     layout::{Constraint, Rect},
     widgets::{Block, Borders, Cell, Row, Table},
 };
@@ -108,6 +109,14 @@ impl HelpWidget {
             (
                 get_keybind_text(&keybinds.normal.open_in_player),
                 "Open current stream in player",
+            ),
+            (
+                get_keybind_text(&keybinds.normal.toggle_audio),
+                "Toggle background stream audio (streamlink)",
+            ),
+            (
+                get_keybind_text(&keybinds.normal.toggle_sidebar),
+                "Toggle stream info & following sidebar",
             ),
             (
                 get_keybind_text(&keybinds.normal.recent_channels_search),
@@ -260,7 +269,7 @@ impl Component for HelpWidget {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("[ Keybinds ]")
+                    .title("[ Keybinds ] [ Back (Esc / Click) ]")
                     .border_type(self.config.frontend.border_type.clone().into()),
             )
             .column_spacing(2);
@@ -271,6 +280,15 @@ impl Component for HelpWidget {
     }
 
     async fn event(&mut self, event: &Event) -> Result<()> {
+        if let Event::Mouse(mouse) = event {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.event_tx
+                    .send(Event::Internal(InternalEvent::BackOneLayer))
+                    .await?;
+            }
+            return Ok(());
+        }
+
         if let Event::Input(key) = event {
             let keybinds = &self.config.keybinds.selection;
             match key {
