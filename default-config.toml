@@ -47,12 +47,25 @@ enabled = false
 reversed = false
 
 [frontend]
+# Enable background stream audio playback via streamlink.
+audio = false
+# Optional custom audio player command and arguments to pipe streamlink stdout into.
+# When empty, twt auto-detects ffplay, mpv, cvlc, or vlc.
+audio_player = []
 # The command and its args that should be used to view the stream (eg. mpv, streamlink)
 view_command = []
 # Whether to automatically start view_command when changing to a new stream
 autostart_view_command = false
 # If the time and date is to be shown in the chat window.
 show_datetimes = true
+# Render timestamps in compact relative glim style (now, 30s, 5m, 1h).
+relative_time = true
+# Group chat messages with a horizontal divider every N minutes (0 to disable).
+time_group_minutes = 5
+# Show the vertical sidebar with live stream metadata and followed channels.
+sidebar = true
+# Width in columns of the vertical sidebar.
+sidebar_width = 38
 # The format of string that will show up in the terminal.
 # Specification of formatting datetime strings can be found here: https://strftime.org/
 datetime_format = "%a %b %e %T %Y"
@@ -102,7 +115,7 @@ border_type = "plain"
 hide_chat_border = false
 # If the usernames should be aligned to the right.
 # They will be shown to the left if this is disabled.
-right_align_usernames = false
+right_align_usernames = true
 # Do not display the window size warning.
 show_unsupported_screen_size = true
 # The following widget will only contain channels that are currently live

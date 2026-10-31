@@ -12,12 +12,24 @@ use tui::widgets::BorderType;
     reason = "Frontend config has no need to be split into multiple structs"
 )]
 pub struct FrontendConfig {
+    /// Whether stream audio via streamlink should be enabled
+    pub audio: bool,
+    /// Optional custom audio player command and arguments to pipe streamlink stdout into
+    pub audio_player: Vec<String>,
     /// The command and arguments that should be used to view the stream
     pub view_command: Vec<String>,
     /// Whether `view_command` should automatically be started when opening a stream
     pub autostart_view_command: bool,
     /// If the time and date is to be shown.
     pub show_datetimes: bool,
+    /// Render timestamps in compact relative `glim` style (`now`, `2m`, `1h`).
+    pub relative_time: bool,
+    /// Group chat messages with a horizontal time divider every N minutes (0 to disable).
+    pub time_group_minutes: u64,
+    /// Show the vertical sidebar with live stream metadata and followed channels.
+    pub sidebar: bool,
+    /// Width in columns of the vertical sidebar.
+    pub sidebar_width: u16,
     /// The format of string that will show up in the terminal.
     pub datetime_format: String,
     /// If the username should be shown.
@@ -80,9 +92,15 @@ impl FrontendConfig {
 impl Default for FrontendConfig {
     fn default() -> Self {
         Self {
+            audio: false,
+            audio_player: vec![],
             view_command: vec![],
             autostart_view_command: false,
             show_datetimes: true,
+            relative_time: true,
+            time_group_minutes: 5,
+            sidebar: true,
+            sidebar_width: 38,
             datetime_format: "%a %b %e %T %Y".to_string(),
             username_shown: true,
             palette: Palette::default(),
@@ -114,6 +132,8 @@ impl Default for FrontendConfig {
 impl From<FrontendConfig> for Vec<(String, String)> {
     fn from(config: FrontendConfig) -> Self {
         vec![
+            ("Audio".to_string(), config.audio.to_string()),
+            ("Audio player".to_string(), config.audio_player.join(" ")),
             ("View command".to_string(), config.view_command.join(" ")),
             (
                 "Autostart view command".to_string(),

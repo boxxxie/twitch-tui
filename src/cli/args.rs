@@ -50,6 +50,10 @@ impl ValueEnum for State {
 #[derive(Parser, Debug)]
 #[clap(rename_all = "kebab-case")]
 #[clap(author, version, about)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI boolean flags map directly to command-line switches"
+)]
 /// Twitch chat in the terminal
 pub struct Cli {
     /// The streamer's name
@@ -85,6 +89,9 @@ pub struct Cli {
     /// Show a warning if the screen size is too small
     #[arg(short, long)]
     pub unsupported_screen_size: bool,
+    /// Enable background stream audio via streamlink
+    #[arg(short, long)]
+    pub audio: bool,
 }
 
 pub fn merge_args_into_config(config: &mut CoreConfig, args: Cli) {
@@ -128,4 +135,6 @@ pub fn merge_args_into_config(config: &mut CoreConfig, args: Cli) {
     if args.unsupported_screen_size {
         config.frontend.show_unsupported_screen_size = false;
     }
+
+    config.frontend.audio = config.frontend.audio || args.audio;
 }
