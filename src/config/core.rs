@@ -95,9 +95,12 @@ impl CoreConfig {
                     && !support_graphics_protocol().unwrap_or(false)
                 {
                     eprintln!(
-                        "This terminal does not support the graphics protocol.\nUse a terminal such as kitty, or disable emotes."
+                        "Note: Terminal graphics protocol probe did not succeed; falling back to text emotes."
                     );
-                    std::process::exit(1);
+                    config.frontend.twitch_emotes = false;
+                    config.frontend.betterttv_emotes = false;
+                    config.frontend.seventv_emotes = false;
+                    config.frontend.frankerfacez_emotes = false;
                 }
             }
 

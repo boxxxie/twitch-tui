@@ -438,6 +438,7 @@ fn query_terminal(command: &[u8]) -> Result<String> {
 }
 
 const SUPPORTED_TERMINALS: [&str; 2] = ["xterm-kitty", "xterm-ghostty"];
+const SUPPORTED_TERM_PROGRAMS: [&str; 4] = ["WarpTerminal", "ghostty", "kitty", "WezTerm"];
 
 static IS_TMUX: LazyLock<bool> = LazyLock::new(|| env::var("TMUX").is_ok());
 
@@ -453,13 +454,34 @@ fn graphics_protocol_query() -> String {
     ) + csi!("c")
 }
 
-/// First check if the terminal is `kitty`, this is the only terminal that supports the graphics protocol using unicode placeholders as of 2023-07-13.
+fn is_graphics_capable_terminal_env(
+    term: Option<&str>,
+    term_program: Option<&str>,
+    kitty_window_id: Option<&str>,
+) -> bool {
+    term.is_some_and(|t| SUPPORTED_TERMINALS.contains(&t))
+        || term_program.is_some_and(|tp| {
+            SUPPORTED_TERM_PROGRAMS
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(tp))
+        })
+        || kitty_window_id.is_some_and(|id| !id.is_empty())
+}
+
+/// First check if the terminal is `kitty`, `ghostty`, or `WarpTerminal` (`TERM_PROGRAM=WarpTerminal`).
 /// Then check that it supports the graphics protocol using temporary files, by sending a graphics protocol request followed by a request for terminal attributes.
 /// If we receive the terminal attributes without receiving the response for the graphics protocol, it does not support it.
 pub fn support_graphics_protocol() -> Result<bool> {
+    let term = env::var("TERM").ok();
+    let term_program = env::var("TERM_PROGRAM").ok();
+    let kitty_window_id = env::var("KITTY_WINDOW_ID").ok();
+
     Ok(*IS_TMUX
-        || (env::var("TERM").is_ok_and(|term| SUPPORTED_TERMINALS.contains(&term.as_str()))
-            && query_terminal(graphics_protocol_query().as_bytes())?.contains("OK")))
+        || (is_graphics_capable_terminal_env(
+            term.as_deref(),
+            term_program.as_deref(),
+            kitty_window_id.as_deref(),
+        ) && query_terminal(graphics_protocol_query().as_bytes())?.contains("OK")))
 }
 
 #[cfg(test)]
@@ -586,5 +608,29 @@ mod tests {
             graphics_protocol_query(),
             "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c"
         );
+    }
+
+    #[test]
+    fn graphics_terminal_detection_supports_warp_and_ghostty() {
+        assert!(is_graphics_capable_terminal_env(
+            Some("xterm-256color"),
+            Some("WarpTerminal"),
+            None
+        ));
+        assert!(is_graphics_capable_terminal_env(
+            Some("xterm-ghostty"),
+            None,
+            None
+        ));
+        assert!(is_graphics_capable_terminal_env(
+            Some("xterm-256color"),
+            None,
+            Some("1")
+        ));
+        assert!(!is_graphics_capable_terminal_env(
+            Some("xterm-256color"),
+            None,
+            None
+        ));
     }
 }
