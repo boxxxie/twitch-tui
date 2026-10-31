@@ -178,7 +178,7 @@ impl App {
 
         let emotes_rx = query_emotes(&config, twitch_oauth.clone(), initial_channel.clone());
 
-        Ok(Self {
+        let app = Self {
             running: true,
             components,
             config,
@@ -198,7 +198,24 @@ impl App {
             emotes_rx,
             decoded_emotes_rx,
             running_stream: None,
-        })
+        };
+        app.sync_window_title();
+        Ok(app)
+    }
+
+    fn sync_window_title(&self) {
+        let title = match self.state {
+            State::Dashboard => {
+                if let Some(ch) = &self.connected_channel {
+                    format!(" twt • Browse (🔊 #{ch})")
+                } else {
+                    " twt • Browse".to_string()
+                }
+            }
+            State::Normal => format!(" twt • #{}", self.current_channel),
+            State::Help => format!(" twt • Help (#{})", self.current_channel),
+        };
+        crate::commands::set_terminal_window_title(&title);
     }
 
     fn open_stream(&mut self, channel: &str) -> Result<()> {
@@ -291,6 +308,7 @@ impl App {
         self.state = other;
 
         self.components.state_tabs.select(&self.state);
+        self.sync_window_title();
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {

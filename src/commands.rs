@@ -12,11 +12,32 @@ use tui::{
         cursor::{DisableBlinking, EnableBlinking, SetCursorStyle},
         event::{DisableMouseCapture, EnableMouseCapture},
         execute, queue,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+        terminal::{
+            EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
+        },
     },
 };
 
 use crate::config::{CursorType, FrontendConfig};
+
+pub fn set_terminal_window_title(title: &str) {
+    let clean: String = title
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(120)
+        .collect();
+
+    let mut out = stdout();
+    let _ = execute!(out, SetTitle(&clean));
+
+    if std::env::var_os("TMUX").is_some() {
+        let _ = write!(
+            out,
+            "\x1b]2;{clean}\x07\x1bPtmux;\x1b\x1b]0;{clean}\x07\x1b\\"
+        );
+    }
+    let _ = out.flush();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetCursorShape;
@@ -63,6 +84,7 @@ pub fn init_terminal(frontend_config: &FrontendConfig) -> Result<DefaultTerminal
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
+        SetTitle(" twt • Twitch"),
         cursor_style,
     )?;
 

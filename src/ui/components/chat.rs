@@ -402,7 +402,7 @@ impl ChatWidget {
             _ => return Ok(()),
         }
 
-        // Top title bar pills: [0]=Time, [1]=Channel, [2]=Filter, [3]=Audio, [4]=Sidebar, [5]=?
+        // Top title bar pills: [0]= twt (Time), [1]=Channel, [2]=Filter, [3]=Audio, [4]=Sidebar, [5]=?
         if let Some((idx, _)) = self
             .top_title_rects
             .iter()
@@ -410,6 +410,13 @@ impl ChatWidget {
             .find(|(_, r)| r.contains(pos))
         {
             match idx {
+                0 => {
+                    self.event_tx
+                        .send(Event::Internal(InternalEvent::SwitchState(
+                            State::Dashboard,
+                        )))
+                        .await?;
+                }
                 1 => self.channel_input.toggle_focus(),
                 2 => {
                     let mut filters = self.filters.borrow_mut();
@@ -623,7 +630,7 @@ impl Component for ChatWidget {
         let audio_badge = self.audio_badge();
 
         let spans = [
-            TitleStyle::Combined("Time", &current_time),
+            TitleStyle::Combined(" twt", &current_time),
             TitleStyle::Combined("Channel", self.current_channel_name.as_str()),
             Self::status_badge(
                 if reversed_filters { "retliF" } else { "Filter" },
