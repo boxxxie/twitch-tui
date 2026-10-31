@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{SharedCoreConfig, get_data_dir};
 
-static ITEM_KEYS: &[&str] = &["channels", "mentions", "chatters"];
+static ITEM_KEYS: &[&str] = &["channels", "mentions", "chatters", "last_channel"];
 const DEFAULT_STORAGE_FILE_NAME: &str = "storage.json";
 
 pub type SharedStorage = Rc<RefCell<Storage>>;
@@ -49,8 +49,25 @@ impl Storage {
             let file_content =
                 read_to_string(&storage_path).context("Failed to read storage file")?;
 
-            let items: StorageMap =
+            let mut items: StorageMap =
                 serde_json::from_str(&file_content).context("Failed to parse storage file")?;
+
+            for item_key in ITEM_KEYS {
+                let enabled = match *item_key {
+                    "channels" => storage_config.channels,
+                    "mentions" => storage_config.mentions,
+                    "chatters" => storage_config.chatters,
+                    "last_channel" => true,
+                    _ => false,
+                };
+                items
+                    .entry((*item_key).to_string())
+                    .and_modify(|item| item.enabled = enabled)
+                    .or_insert_with(|| StorageItem {
+                        content: vec![],
+                        enabled,
+                    });
+            }
 
             return Ok(Self {
                 items,
@@ -65,6 +82,7 @@ impl Storage {
                 "channels" => storage_config.channels,
                 "mentions" => storage_config.mentions,
                 "chatters" => storage_config.chatters,
+                "last_channel" => true,
                 _ => bail!("Invalid storage key {item_key}."),
             };
 
@@ -167,5 +185,35 @@ impl Storage {
         };
 
         Ok(Some(item.content.remove(position)))
+    }
+
+    pub fn set_last_channel(&mut self, channel: &str) {
+        let clean = channel.trim().trim_start_matches('#').to_lowercase();
+        if clean.is_empty() {
+            return;
+        }
+        self.items.insert(
+            "last_channel".to_string(),
+            StorageItem {
+                content: vec![clean.clone()],
+                enabled: true,
+            },
+        );
+        let _ = self.add("channels", clean);
+        let _ = self.dump_data();
+    }
+
+    #[must_use]
+    pub fn last_channel(&self) -> Option<String> {
+        self.items
+            .get("last_channel")
+            .and_then(|item| item.content.last().cloned())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.items
+                    .get("channels")
+                    .and_then(|item| item.content.last().cloned())
+                    .filter(|s| !s.is_empty())
+            })
     }
 }
