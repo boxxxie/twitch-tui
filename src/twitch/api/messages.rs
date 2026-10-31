@@ -1,4 +1,7 @@
-use color_eyre::{Result, eyre::ContextCompat};
+use color_eyre::{
+    Result,
+    eyre::{ContextCompat, bail},
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -24,9 +27,16 @@ impl NewTwitchMessage {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct TwitchMessageDropReason {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct TwitchNewMessageResponse {
-    message_id: String,
-    is_sent: bool,
+    pub message_id: String,
+    pub is_sent: bool,
+    pub drop_reason: Option<TwitchMessageDropReason>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -43,18 +53,28 @@ pub async fn send_twitch_message(
 ) -> Result<TwitchNewMessageResponse> {
     let url = format!("{TWITCH_API_BASE_URL}/chat/messages");
 
-    let response_data = client
-        .post(url)
-        .json(&new_message)
-        .send()
-        .await?
-        .error_for_status()?
+    let response = client.post(url).json(&new_message).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("Twitch API error ({status}): {body}");
+    }
+
+    let response_data = response
         .json::<TwitchNewMessageResponseList>()
         .await?
         .data
         .first()
         .context("Could not get new Twitch message response")?
         .clone();
+
+    if !response_data.is_sent {
+        let reason = response_data.drop_reason.as_ref().map_or_else(
+            || "Message was dropped by Twitch".to_string(),
+            |r| format!("{} ({})", r.message, r.code),
+        );
+        bail!("{reason}");
+    }
 
     Ok(response_data)
 }

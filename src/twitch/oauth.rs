@@ -103,6 +103,16 @@ impl TwitchOauth {
         self.inner_oauth.as_ref().map(|oauth| oauth.user_id.clone())
     }
 
+    pub fn login(&self) -> Option<String> {
+        self.inner_oauth.as_ref().map(|oauth| oauth.login.clone())
+    }
+
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.inner_oauth
+            .as_ref()
+            .is_some_and(|oauth| oauth.scopes.iter().any(|s| s == scope))
+    }
+
     pub fn client(&self) -> Option<Client> {
         self.inner_client.clone()
     }

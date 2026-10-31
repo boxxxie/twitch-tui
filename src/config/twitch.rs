@@ -20,9 +20,14 @@ pub struct TwitchConfig {
 impl TwitchConfig {
     #[must_use]
     pub fn config_twitch_websocket_url(&self) -> String {
+        let server = if self.server.starts_with("ws://") || self.server.starts_with("wss://") {
+            self.server.as_str()
+        } else {
+            "wss://eventsub.wss.twitch.tv/ws"
+        };
         format!(
-            "{}?keepalive_timeout_seconds={}",
-            self.server, self.keepalive_timeout_seconds
+            "{server}?keepalive_timeout_seconds={}",
+            self.keepalive_timeout_seconds
         )
     }
 }

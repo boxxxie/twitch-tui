@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 use crate::{
     config::SharedCoreConfig,
     events::{Event, TwitchAction},
-    handlers::{data::DataBuilder, state::State},
+    handlers::data::DataBuilder,
     twitch::{
         context::TwitchWebsocketContext,
         handlers::{
@@ -73,6 +73,19 @@ impl TwitchWebsocketThread {
     }
 
     async fn connect(&mut self) -> Result<WebsocketStream> {
+        if self.context.channel_name().is_none() {
+            debug!("Waiting for initial channel selection");
+
+            loop {
+                if let Some(TwitchAction::JoinChannel(channel_name)) = self.action_rx.recv().await {
+                    self.context.set_channel_name(Some(channel_name));
+
+                    debug!("Selected initial channel for websocket subscription");
+                    break;
+                }
+            }
+        }
+
         let url = self.config.twitch.config_twitch_websocket_url();
         let (ws_stream, _) = match connect_async(url).await {
             Ok(websocket_connection) => websocket_connection,
@@ -89,35 +102,20 @@ impl TwitchWebsocketThread {
 
         let (_, mut stream) = ws_stream.split();
 
-        // If the dashboard is the start state, wait until the user has selected
-        // a channel before connecting to Twitch's websocket server.
-        if self.config.terminal.first_state == State::Dashboard {
-            debug!("Waiting for user to select channel from dashboard screen");
-
-            loop {
-                if let Some(TwitchAction::JoinChannel(channel_name)) = self.action_rx.recv().await {
-                    self.context.set_channel_name(Some(channel_name));
-
-                    debug!("User has selected channel from start screen");
-                    break;
-                }
-            }
-        } else {
-            self.context
-                .set_channel_name(Some(self.config.twitch.channel.clone()));
-        }
-
         let emotes_enabled = self.config.frontend.is_emotes_enabled();
 
         self.context.set_emotes_state(emotes_enabled);
         self.context.set_token(self.config.twitch.token.clone());
 
-        if stream.next().await.is_some() {
-            debug!("Websocket server has pinged you to make sure you're here");
+        let mut welcome_message = None;
+        while let Some(frame) = stream.next().await {
+            if let Ok(Message::Text(text)) = frame {
+                welcome_message = Some(text);
+                break;
+            }
         }
 
-        // Handle the welcome message, it should arrive after the initial ping
-        let Some(Ok(Message::Text(message))) = stream.next().await else {
+        let Some(message) = welcome_message else {
             let error_message = "Welcome message from websocket server was not found, something has gone terribly wrong";
             self.event_tx
                 .send(DataBuilder::system(error_message.to_string()).into())
@@ -136,29 +134,44 @@ impl TwitchWebsocketThread {
     }
 
     async fn run(&mut self) -> Result<()> {
-        let mut stream = self.connect().await?;
-
         loop {
-            tokio::select! {
-                biased;
-
-                Some(action) = self.action_rx.recv() => {
-                    if let Err(err) = self.handle_twitch_action(action).await {
-                        error!("Failed to handle twitch action: {err}");
-                    }
+            let mut stream = match self.connect().await {
+                Ok(s) => s,
+                Err(err) => {
+                    error!("Failed to connect to Twitch EventSub websocket: {err}");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
                 }
-                Some(message) = stream.next() => {
-                    match message {
-                        Ok(msg) => if let Err(err) = self.handle_websocket_stream_message(msg).await {
-                            error!("Failed to handle websocket message: {err}");
-                        },
-                        Err(err) => {
-                            error!("Twitch connection error encountered: {err}, attempting to reconnect.");
+            };
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    Some(action) = self.action_rx.recv() => {
+                        if let Err(err) = self.handle_twitch_action(action).await {
+                            error!("Failed to handle twitch action: {err}");
                         }
                     }
-                }
-                else => {}
-            };
+                    maybe_msg = stream.next() => {
+                        match maybe_msg {
+                            Some(Ok(msg)) => {
+                                if let Err(err) = self.handle_websocket_stream_message(msg).await {
+                                    error!("Failed to handle websocket message: {err}");
+                                }
+                            }
+                            Some(Err(err)) => {
+                                error!("Twitch connection error encountered: {err}, reconnecting.");
+                                break;
+                            }
+                            None => {
+                                info!("Twitch websocket stream closed, reconnecting.");
+                                break;
+                            }
+                        }
+                    }
+                };
+            }
         }
     }
 
@@ -179,8 +192,11 @@ impl TwitchWebsocketThread {
                             .await?;
                         return Err(err);
                     }
-                } else {
-                    handle_send_message(&self.context, message).await?;
+                } else if let Err(err) = handle_send_message(&self.context, message).await {
+                    self.event_tx
+                        .send(DataBuilder::twitch(format!("Failed to send message: {err}")).into())
+                        .await?;
+                    return Err(err);
                 }
             }
             TwitchAction::JoinChannel(channel_name) => {

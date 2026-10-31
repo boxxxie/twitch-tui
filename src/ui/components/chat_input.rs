@@ -104,12 +104,30 @@ impl ChatInputWidget {
         self.input.is_focused()
     }
 
+    pub const fn is_emote_picker_focused(&self) -> bool {
+        self.emote_picker.is_focused()
+    }
+
+    #[must_use]
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        self.input.contains(column, row)
+    }
+
     pub const fn toggle_focus(&mut self) {
         self.input.toggle_focus();
     }
 
     pub fn toggle_focus_with(&mut self, s: &str) {
         self.input.toggle_focus_with(s);
+    }
+
+    pub fn focus_with_mention(&mut self, username: &str) {
+        let prefix = format!("@{username} ");
+        if !self.input.is_focused() {
+            self.input.toggle_focus_with("");
+            self.input.clear();
+        }
+        self.input.insert(&prefix);
     }
 }
 
@@ -138,6 +156,10 @@ impl Component for ChatInputWidget {
 
         if self.emote_picker.is_focused() {
             return self.emote_picker.event(event).await;
+        }
+
+        if matches!(event, Event::Mouse(_)) {
+            return self.input.event(event).await;
         }
 
         if let Event::Input(key) = event {

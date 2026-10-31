@@ -50,6 +50,10 @@ impl TwitchWebsocketContext {
         self.channel_name.as_ref()
     }
 
+    pub const fn token(&self) -> Option<&String> {
+        self.token.as_ref()
+    }
+
     pub fn set_oauth(&mut self, oauth: Option<TwitchOauth>) {
         self.oauth = oauth;
     }
