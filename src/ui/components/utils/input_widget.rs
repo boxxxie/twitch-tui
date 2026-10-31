@@ -104,7 +104,12 @@ impl<T: Clone> InputWidget<T> {
 
     pub fn toggle_focus_with(&mut self, s: &str) {
         self.focused = !self.focused;
-        self.input.update(s, 1, &mut self.input_listener);
+        self.input.update(s, s.len(), &mut self.input_listener);
+    }
+
+    pub fn focus_and_set(&mut self, s: &str) {
+        self.focused = true;
+        self.input.update(s, s.len(), &mut self.input_listener);
     }
 
     pub fn is_valid(&self) -> bool {
@@ -115,14 +120,15 @@ impl<T: Clone> InputWidget<T> {
 
     pub fn accept_suggestion(&mut self) {
         if let Some(suggestion) = &self.suggestion {
-            self.input.update(suggestion, 0, &mut self.input_listener);
+            self.input
+                .update(suggestion, suggestion.len(), &mut self.input_listener);
         }
     }
 
     pub fn insert(&mut self, s: &str) {
-        self.input
-            .insert_str(self.input.pos(), s, &mut self.input_listener);
-        self.input.set_pos(self.input.pos() + s.len());
+        let pos = self.input.pos().min(self.input.len());
+        self.input.insert_str(pos, s, &mut self.input_listener);
+        self.input.set_pos(pos + s.len());
     }
 }
 

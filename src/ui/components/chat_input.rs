@@ -124,10 +124,10 @@ impl ChatInputWidget {
     pub fn focus_with_mention(&mut self, username: &str) {
         let prefix = format!("@{username} ");
         if !self.input.is_focused() {
-            self.input.toggle_focus_with("");
-            self.input.clear();
+            self.input.focus_and_set(&prefix);
+        } else {
+            self.input.insert(&prefix);
         }
-        self.input.insert(&prefix);
     }
 }
 
@@ -202,5 +202,34 @@ impl Component for ChatInputWidget {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::{config::CoreConfig, emotes::Emotes, handlers::storage::Storage};
+
+    #[test]
+    fn test_focus_with_mention_does_not_panic() {
+        let config = Arc::new(CoreConfig::default());
+        let (tx, _rx) = mpsc::channel(10);
+        let storage = Rc::new(RefCell::new(Storage::new(&config).unwrap()));
+        let emotes = Rc::new(Emotes::new(false));
+
+        let mut widget = ChatInputWidget::new(config, tx, storage, emotes);
+        assert!(!widget.is_focused());
+
+        // First click when unfocused (previously panicked in LineBuffer::update("", 1))
+        widget.focus_with_mention("BowmanDean");
+        assert!(widget.is_focused());
+        assert_eq!(widget.to_string(), "@BowmanDean ");
+
+        // Second click while already focused appends another mention
+        widget.focus_with_mention("boxxy_queen_of_b");
+        assert_eq!(widget.to_string(), "@BowmanDean @boxxy_queen_of_b ");
     }
 }
