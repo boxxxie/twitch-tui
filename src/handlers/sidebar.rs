@@ -297,7 +297,7 @@ impl SidebarState {
     pub fn draw(&mut self, f: &mut Frame, area: Rect, config: &SharedCoreConfig, msg_count: usize) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(1)])
+            .constraints([Constraint::Length(13), Constraint::Min(1)])
             .split(area);
 
         if let Some(&top_area) = chunks.first() {
@@ -308,6 +308,10 @@ impl SidebarState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Renders the Twitch Glitch + TWT block-art logo alongside live stream metadata"
+    )]
     fn draw_stream_info(
         &mut self,
         f: &mut Frame,
@@ -326,6 +330,9 @@ impl SidebarState {
         let emerald = Color::Rgb(0x50, 0xC8, 0x78);
         let sky_cyan = Color::Rgb(0x38, 0xBD, 0xF8);
         let lavender = Color::Rgb(0xA7, 0x8B, 0xFA);
+        let purple = Color::Rgb(0x91, 0x46, 0xFF);
+        let purple_bright = Color::Rgb(0xA9, 0x70, 0xFF);
+        let purple_deep = Color::Rgb(0x5C, 0x16, 0xC5);
         let text_bright = Color::Rgb(0xEC, 0xF0, 0xFF);
         let text_secondary = Color::Rgb(0xC0, 0xCA, 0xF5);
         let text_muted = Color::Rgb(0x94, 0x9C, 0xBB);
@@ -342,7 +349,7 @@ impl SidebarState {
         );
 
         let title_spans = [
-            TitleStyle::Single("Stream Info"),
+            TitleStyle::Single(" twt"),
             TitleStyle::Custom(status_span),
             TitleStyle::Single("Watch"),
         ];
@@ -355,6 +362,43 @@ impl SidebarState {
             .style(*TEXT_DARK_STYLE);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
+
+        if !*NO_COLOR {
+            let p_main = Style::default().fg(purple).add_modifier(Modifier::BOLD);
+            let p_bright = Style::default()
+                .fg(purple_bright)
+                .add_modifier(Modifier::BOLD);
+            let p_shadow = Style::default().fg(purple_deep);
+            let eye_style = Style::default()
+                .fg(Color::Rgb(0xFF, 0xFF, 0xFF))
+                .bg(purple)
+                .add_modifier(Modifier::BOLD);
+
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("▄██████▄", p_main),
+                Span::raw("  "),
+                Span::styled("████ █   █ ████", p_bright),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("██", p_main),
+                Span::styled("█", eye_style),
+                Span::styled("██", p_main),
+                Span::styled("█", eye_style),
+                Span::styled("██", p_main),
+                Span::raw("  "),
+                Span::styled(" ██  █ █ █  ██ ", p_main),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("▀██", p_main),
+                Span::styled("▄", p_shadow),
+                Span::styled("▀▀▀", p_main),
+                Span::raw("   "),
+                Span::styled(" ▀▀   ▀ ▀   ▀▀ ", p_shadow),
+            ]));
+        }
 
         if let Some(meta) = &self.snapshot.current_stream {
             let bold_cyan = Style::default().fg(sky_cyan).add_modifier(Modifier::BOLD);

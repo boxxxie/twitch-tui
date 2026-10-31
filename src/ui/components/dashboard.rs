@@ -134,7 +134,7 @@ impl DashboardWidget {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "Renders the 3-row truecolor Twitch Glitch pixel-art logo alongside the navigation and action bar"
+        reason = "Renders the large AGY-style 5-row truecolor Twitch Glitch + TWT block-art logo alongside the navigation and action bar"
     )]
     fn draw_top_navbar(&mut self, f: &mut Frame, area: Rect) {
         let purple = if *NO_COLOR {
@@ -204,23 +204,23 @@ impl DashboardWidget {
 
         self.action_rects.clear();
 
-        // Row 1: Top of Glitch mascot + `twt` title + Browse tab + Action pills
+        let p_main = Style::default().fg(purple).add_modifier(Modifier::BOLD);
+        let p_bright = Style::default()
+            .fg(purple_bright)
+            .add_modifier(Modifier::BOLD);
+        let p_shadow = Style::default().fg(purple_deep);
+        let eye_style = Style::default()
+            .fg(white)
+            .bg(purple)
+            .add_modifier(Modifier::BOLD);
+
+        // Row 1: Large Twitch Glitch mascot top + TWT block-art top + Browse tab + Action pills
         let mut row1_spans = vec![
-            Span::raw(" "),
-            Span::styled("▄██████▄", Style::default().fg(purple)),
             Span::raw("  "),
-            Span::styled(
-                " twt",
-                Style::default()
-                    .fg(purple_bright)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " • TWITCH TUI  ",
-                Style::default()
-                    .fg(text_secondary)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("▄████████████▄", p_main),
+            Span::raw("   "),
+            Span::styled("██████  ██    ██  ██████", p_bright),
+            Span::raw("   "),
             Span::styled("│ ", Style::default().fg(text_secondary)),
             Span::styled(
                 "Browse",
@@ -238,7 +238,7 @@ impl DashboardWidget {
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum::<usize>(),
             )
-            .unwrap_or(36)
+            .unwrap_or(56)
             .saturating_add(1),
         );
         let row1_y = area.y.saturating_add(1);
@@ -255,29 +255,50 @@ impl DashboardWidget {
             }
             x = x.saturating_add(w);
             row1_spans.push(Span::styled("[", Style::default().fg(text_secondary)));
-            row1_spans.push(Span::styled(
-                key_txt.clone(),
-                Style::default()
-                    .fg(purple_bright)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            row1_spans.push(Span::styled(key_txt.clone(), p_bright));
             row1_spans.push(Span::styled("] ", Style::default().fg(text_secondary)));
             row1_spans.push(Span::styled(*label, Style::default().fg(text_primary)));
         }
 
-        // Row 2: Glitch mascot white eyes (`█` on purple background) + Last watched channel status
-        let eye_style = Style::default()
-            .fg(white)
-            .bg(purple)
-            .add_modifier(Modifier::BOLD);
+        // Row 2: Glitch mascot upper eyes + TWT block-art row 2 + Account / version info
         let row2_spans = vec![
-            Span::raw(" "),
-            Span::styled("██", Style::default().fg(purple)),
-            Span::styled("█", eye_style),
-            Span::styled("██", Style::default().fg(purple)),
-            Span::styled("█", eye_style),
-            Span::styled("██", Style::default().fg(purple)),
             Span::raw("  "),
+            Span::styled("███", p_main),
+            Span::styled("██", eye_style),
+            Span::styled("████", p_main),
+            Span::styled("██", eye_style),
+            Span::styled("███", p_main),
+            Span::styled("█", p_shadow),
+            Span::raw("  "),
+            Span::styled("  ██    ██    ██    ██  ", p_bright),
+            Span::raw("   "),
+            Span::styled("│ ", Style::default().fg(text_secondary)),
+            Span::styled(" Twitch TUI ", p_bright),
+            Span::styled(
+                format!("v{}  •  Signed in as ", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(text_secondary),
+            ),
+            Span::styled(
+                format!("@{}", self.config.twitch.username),
+                Style::default()
+                    .fg(text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        // Row 3: Glitch mascot lower eyes + TWT block-art row 3 + Last watched channel status
+        let row3_spans = vec![
+            Span::raw("  "),
+            Span::styled("███", p_main),
+            Span::styled("██", eye_style),
+            Span::styled("████", p_main),
+            Span::styled("██", eye_style),
+            Span::styled("███", p_main),
+            Span::styled("█", p_shadow),
+            Span::raw("  "),
+            Span::styled("  ██    ██ █▄ █     ██  ", p_main),
+            Span::raw("   "),
+            Span::styled("│ ", Style::default().fg(text_secondary)),
             Span::styled("Last watched: ", Style::default().fg(text_secondary)),
             Span::styled(
                 format!("#{last_chan} "),
@@ -298,14 +319,16 @@ impl DashboardWidget {
             },
         ];
 
-        // Row 3: Glitch mascot speech-bubble tail + quick navigation hint
+        // Row 4: Glitch mascot lower jaw + TWT block-art row 4 + Live followed channel count
         let live_count = self.sidebar.borrow().snapshot.live_channels.len();
-        let row3_spans = vec![
-            Span::raw(" "),
-            Span::styled("▀██", Style::default().fg(purple)),
-            Span::styled("▄", Style::default().fg(purple_deep)),
-            Span::styled("▀▀▀", Style::default().fg(purple)),
+        let row4_spans = vec![
+            Span::raw("  "),
+            Span::styled("████████████▀▀", p_main),
+            Span::styled("█", p_shadow),
+            Span::raw("  "),
+            Span::styled("  ██    ██▄██▄██    ██  ", p_main),
             Span::raw("   "),
+            Span::styled("│ ", Style::default().fg(text_secondary)),
             Span::styled(
                 format!("● {live_count} followed channels live"),
                 Style::default().fg(if live_count > 0 {
@@ -314,23 +337,21 @@ impl DashboardWidget {
                     text_secondary
                 }),
             ),
-            Span::styled(
-                "  •  Click any stream card or press ",
-                Style::default().fg(text_secondary),
-            ),
-            Span::styled(
-                "1-9",
-                Style::default()
-                    .fg(purple_bright)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        ];
+
+        // Row 5: Glitch mascot speech-bubble tail + TWT block-art base + navigation hint
+        let row5_spans = vec![
+            Span::raw("    "),
+            Span::styled("▀██▀", p_main),
+            Span::styled("▄▄▀▀▀▀▀", p_shadow),
+            Span::raw("    "),
+            Span::styled("  ▀▀     ▀▀  ▀▀     ▀▀  ", p_shadow),
+            Span::raw("   "),
+            Span::styled("│ ", Style::default().fg(text_secondary)),
+            Span::styled("Click any stream card or press ", Style::default().fg(text_secondary)),
+            Span::styled("1-9", p_bright),
             Span::styled(" / ", Style::default().fg(text_secondary)),
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(purple_bright)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("Enter", p_bright),
             Span::styled(" to watch", Style::default().fg(text_secondary)),
         ];
 
@@ -339,7 +360,15 @@ impl DashboardWidget {
             .border_type(self.config.frontend.border_type.clone().into())
             .border_style(*BORDER_DARK_STYLE);
 
-        let lines = if area.height >= 5 {
+        let lines = if area.height >= 7 {
+            vec![
+                Line::from(row1_spans),
+                Line::from(row2_spans),
+                Line::from(row3_spans),
+                Line::from(row4_spans),
+                Line::from(row5_spans),
+            ]
+        } else if area.height >= 5 {
             vec![
                 Line::from(row1_spans),
                 Line::from(row2_spans),
@@ -935,7 +964,13 @@ impl Component for DashboardWidget {
             self.selected_idx = all_channels.len() - 1;
         }
 
-        let nav_height = if r.height >= 16 { 5 } else { 3 };
+        let nav_height = if r.height >= 20 {
+            7
+        } else if r.height >= 14 {
+            5
+        } else {
+            3
+        };
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(nav_height), Constraint::Min(1)])
