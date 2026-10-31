@@ -74,6 +74,9 @@ pub struct App {
     /// Current active channel name for `DuckDB` logging.
     current_channel: String,
 
+    /// Channel currently connected and subscribed in `TwitchWebsocket` + `StreamAudio`.
+    connected_channel: Option<String>,
+
     /// States
     state: State,
     previous_state: Option<State>,
@@ -150,11 +153,12 @@ impl App {
             .clone_from(&initial_channel);
         components.state_tabs.select(&first_state);
 
-        if first_state == State::Normal {
+        let connected_channel = if first_state == State::Normal {
             if config.frontend.audio {
                 audio.borrow_mut().play(&initial_channel);
             }
             let _ = twitch_tx.try_send(TwitchAction::JoinChannel(initial_channel.clone()));
+            Some(initial_channel.clone())
         } else {
             // Auto-resume the last active channel if it is currently live on Twitch
             let oauth_clone = twitch_oauth.clone();
@@ -169,7 +173,8 @@ impl App {
                         .await;
                 }
             });
-        }
+            None
+        };
 
         let emotes_rx = query_emotes(&config, twitch_oauth.clone(), initial_channel.clone());
 
@@ -186,6 +191,7 @@ impl App {
             audio,
             sidebar,
             current_channel: initial_channel,
+            connected_channel,
             state: first_state,
             previous_state: None,
             emotes,
@@ -388,7 +394,20 @@ impl App {
         match twitch_action {
             TwitchAction::JoinChannel(channel) => {
                 let channel = clean_channel_name(channel);
+
+                // If we are already connected to this exact channel, keep existing in-memory
+                // messages, EventSub subscriptions, and audio stream alive—just switch to Chat view.
+                if self
+                    .connected_channel
+                    .as_ref()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(&channel))
+                {
+                    self.set_state(State::Normal);
+                    return Ok(());
+                }
+
                 self.current_channel.clone_from(&channel);
+                self.connected_channel = Some(channel.clone());
                 self.storage.borrow_mut().set_last_channel(&channel);
                 let restored = self
                     .duckdb

@@ -32,6 +32,14 @@ pub async fn handle_channel_join(
     channel_name: String,
     first_channel: bool,
 ) -> Result<()> {
+    if !first_channel
+        && context
+            .channel_name()
+            .is_some_and(|c| c.eq_ignore_ascii_case(&channel_name))
+    {
+        return Ok(());
+    }
+
     let twitch_client = context.twitch_client().context("Twitch client not found")?;
     let twitch_oauth = context.oauth().context("No OAuth found")?;
     let current_subscriptions: Vec<Subscription> = context
