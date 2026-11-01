@@ -17,7 +17,7 @@ use crate::{
     app::SharedMessages,
     config::{SharedCoreConfig, Theme},
     emotes::SharedEmotes,
-    events::{Event, InternalEvent, TwitchAction, TwitchEvent},
+    events::{Event, InternalEvent, Key, TwitchAction, TwitchEvent, get_keybind_text},
     handlers::{
         audio::{AudioStatus, SharedAudio, ToastSeverity},
         data::MessageData,
@@ -85,7 +85,12 @@ impl ChatWidget {
         let channel_input =
             ChannelSwitcherWidget::new(config.clone(), event_tx.clone(), storage.clone());
         let search_input = MessageSearchWidget::new(config.clone(), event_tx.clone());
-        let following = FollowingWidget::new(config.clone(), twitch_oauth, event_tx.clone());
+        let following = FollowingWidget::new(
+            config.clone(),
+            twitch_oauth,
+            event_tx.clone(),
+            storage.clone(),
+        );
 
         let scroll_offset = Scrolling::new(config.frontend.inverted_scrolling);
 
@@ -126,6 +131,73 @@ impl ChatWidget {
         }
 
         Ok(())
+    }
+
+    #[must_use]
+    pub fn is_any_input_focused(&self) -> bool {
+        self.chat_input.is_focused()
+            || self.channel_input.is_focused()
+            || self.search_input.is_focused()
+            || self.following.is_focused()
+            || self.chat_input.is_emote_picker_focused()
+    }
+
+    #[must_use]
+    pub fn keybind_badges(&self) -> Vec<(Rect, String)> {
+        let mut out = Vec::new();
+        let kb = &self.config.keybinds.normal;
+
+        let top_keys = [
+            format!("{} : Browse", get_keybind_text(&kb.enter_dashboard)),
+            format!("{} : Channel", get_keybind_text(&kb.recent_channels_search)),
+            format!("{} : Filter", get_keybind_text(&kb.toggle_filters)),
+            format!("{} : Audio", get_keybind_text(&kb.toggle_audio)),
+            format!("{} : Sidebar", get_keybind_text(&kb.toggle_sidebar)),
+            format!("{} : Help", get_keybind_text(&kb.help)),
+        ];
+        for (i, rect) in self.top_title_rects.iter().enumerate() {
+            if let Some(lbl) = top_keys.get(i) {
+                out.push((*rect, lbl.clone()));
+            }
+        }
+
+        let bottom_keys = [
+            format!("{} : Chat", get_keybind_text(&kb.enter_insert)),
+            format!("{} : @Mention", get_keybind_text(&kb.enter_insert_with_mention)),
+            format!("{} : /Cmd", get_keybind_text(&kb.enter_insert_with_command)),
+            format!("{} : Search", get_keybind_text(&kb.search_messages)),
+            format!("{} : Browse", get_keybind_text(&kb.enter_dashboard)),
+        ];
+        for (i, rect) in self.bottom_action_rects.iter().enumerate() {
+            if let Some(lbl) = bottom_keys.get(i) {
+                out.push((*rect, lbl.clone()));
+            }
+        }
+
+        if let Some(scroll_rect) = self.scroll_offset_rect {
+            out.push((
+                scroll_rect,
+                format!("{} : Bottom", get_keybind_text(&kb.scroll_to_end)),
+            ));
+        }
+
+        out.extend(self.sidebar.borrow().keybind_badges());
+        out
+    }
+
+    fn toggle_follow(&self, channel: &str) {
+        let clean = channel.trim().trim_start_matches('#').to_lowercase();
+        if clean.is_empty() {
+            return;
+        }
+        let is_followed = self.sidebar.borrow().is_followed(&clean);
+        if is_followed {
+            self.storage.borrow_mut().unfollow_channel(&clean);
+            self.sidebar.borrow_mut().remove_followed_immediately(&clean);
+        } else {
+            self.storage.borrow_mut().follow_channel(&clean);
+            self.sidebar.borrow_mut().add_followed_immediately(&clean);
+        }
     }
 
     pub fn get_messages<'a>(
@@ -359,6 +431,18 @@ impl ChatWidget {
         }
     }
 
+    fn scroll_chat_up_by(&mut self, steps: usize) {
+        for _ in 0..steps {
+            self.scroll_chat_up();
+        }
+    }
+
+    fn scroll_chat_down_by(&mut self, steps: usize) {
+        for _ in 0..steps {
+            self.scroll_chat_down();
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "Dispatches mouse clicks and scroll wheel across chat pane, title badges, bottom bar, and sidebar"
@@ -494,6 +578,9 @@ impl ChatWidget {
                             TwitchAction::JoinChannel(channel),
                         )))
                         .await?;
+                }
+                SidebarClickAction::ToggleFollow(channel) => {
+                    self.toggle_follow(&channel);
                 }
                 SidebarClickAction::OpenFollowingSearch => {
                     self.following.toggle_focus().await;
@@ -764,15 +851,19 @@ impl Component for ChatWidget {
         }
 
         if self.chat_input.is_focused() {
+            if let Event::Input(Key::PageUp | Key::CtrlUp) = event {
+                self.scroll_chat_up_by(10);
+                return Ok(());
+            } else if let Event::Input(Key::PageDown | Key::CtrlDown) = event {
+                self.scroll_chat_down_by(10);
+                return Ok(());
+            }
             return self.chat_input.event(event).await;
         } else if self.search_input.is_focused() {
             return self.search_input.event(event).await;
         }
 
         if let Event::Input(key) = event {
-            let limit =
-                self.scroll_offset.get_offset() < self.messages.borrow().len().saturating_sub(1);
-
             let keybinds = &self.config.keybinds.normal;
             match key {
                 key if keybinds.enter_insert.contains(key) => self.chat_input.toggle_focus(),
@@ -828,12 +919,22 @@ impl Component for ChatWidget {
                 key if keybinds.toggle_sidebar.contains(key) => {
                     self.sidebar.borrow_mut().toggle_visible();
                 }
+                Key::Char('u') => {
+                    let current = self.current_channel_name.clone();
+                    self.toggle_follow(&current);
+                }
+                Key::PageUp | Key::CtrlUp | Key::Ctrl('u') => {
+                    self.scroll_chat_up_by(10);
+                }
+                Key::PageDown | Key::CtrlDown | Key::Ctrl('d') => {
+                    self.scroll_chat_down_by(10);
+                }
                 key if keybinds.scroll_to_end.contains(key) => {
                     self.scroll_offset.jump_to(0);
                 }
                 key if keybinds.scroll_to_start.contains(key) => {
-                    // TODO: Make this not jump to nothingness
-                    self.scroll_offset.jump_to(self.messages.borrow().len());
+                    self.scroll_offset
+                        .jump_to(self.messages.borrow().len().saturating_sub(1));
                 }
                 key if keybinds.back_to_previous_window.contains(key) => {
                     if self.scroll_offset.get_offset() == 0 {
@@ -845,20 +946,10 @@ impl Component for ChatWidget {
                     self.scroll_offset.jump_to(0);
                 }
                 key if keybinds.scroll_up.contains(key) => {
-                    if limit {
-                        self.scroll_offset.up();
-                    } else if self.scroll_offset.is_inverted() {
-                        self.scroll_offset.down();
-                    }
+                    self.scroll_chat_up();
                 }
                 key if keybinds.scroll_down.contains(key) => {
-                    if self.scroll_offset.is_inverted() {
-                        if limit {
-                            self.scroll_offset.up();
-                        }
-                    } else {
-                        self.scroll_offset.down();
-                    }
+                    self.scroll_chat_down();
                 }
                 _ => {}
             }

@@ -41,6 +41,26 @@ impl HelpWidget {
                 "Join the selected channel",
             ),
             (
+                "Tab".to_string(),
+                "Switch Browse view (Following / Top Live / Categories / Search)",
+            ),
+            (
+                "/".to_string(),
+                "Search live Twitch channels and categories",
+            ),
+            (
+                "r".to_string(),
+                "Refresh live streams and categories from Twitch API",
+            ),
+            (
+                "u / Del / Ctrl+d".to_string(),
+                "Toggle follow / unfollow for the selected channel",
+            ),
+            (
+                "Hold ` / Space".to_string(),
+                "Show visual keybinding overlay on all clickable elements",
+            ),
+            (
                 get_keybind_text(&keybinds.dashboard.recent_channels_search),
                 "Open the recent channel search popup",
             ),
@@ -99,6 +119,10 @@ impl HelpWidget {
                 "Scroll chat up",
             ),
             (
+                "PageUp / PageDown / Ctrl+u / Ctrl+d".to_string(),
+                "Fast-scroll chat history by 10 messages",
+            ),
+            (
                 get_keybind_text(&keybinds.normal.scroll_to_start),
                 "Scroll chat to top",
             ),
@@ -117,6 +141,14 @@ impl HelpWidget {
             (
                 get_keybind_text(&keybinds.normal.toggle_sidebar),
                 "Toggle stream info & following sidebar",
+            ),
+            (
+                "u".to_string(),
+                "Toggle follow / unfollow for the current channel",
+            ),
+            (
+                "Hold ` / Space".to_string(),
+                "Show visual keybinding overlay on all clickable elements",
             ),
             (
                 get_keybind_text(&keybinds.normal.recent_channels_search),
@@ -191,11 +223,23 @@ impl HelpWidget {
             ),
             (
                 get_keybind_text(&keybinds.insert.end_of_next_word),
-                "Move to the end of the next word",
+                "Move to the end of the next word (also Shift+Right)",
             ),
             (
                 get_keybind_text(&keybinds.insert.start_of_previous_word),
-                "Move to the start of the previous word",
+                "Move to the start of the previous word (also Shift+Left)",
+            ),
+            (
+                "Ctrl+Delete / Alt+Delete / Alt+d".to_string(),
+                "Remove the next word to the right",
+            ),
+            (
+                "Up / Down / Ctrl+p / Ctrl+n".to_string(),
+                "Cycle through previously sent chat messages",
+            ),
+            (
+                "PageUp / PageDown / Ctrl+Up / Ctrl+Down".to_string(),
+                "Fast-scroll chat history without leaving chat input",
             ),
             (
                 get_keybind_text(&keybinds.insert.swap_previous_word_with_current),

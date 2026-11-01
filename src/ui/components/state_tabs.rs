@@ -54,6 +54,20 @@ impl StateTabsWidget {
         }
         None
     }
+
+    #[must_use]
+    pub fn keybind_badges(&self) -> Vec<(Rect, String)> {
+        let mut out = Vec::new();
+        for (rect, state) in &self.tab_rects {
+            let label = match state {
+                State::Dashboard => "S: Browse".to_string(),
+                State::Normal => "Enter: Chat".to_string(),
+                State::Help => "?: Help".to_string(),
+            };
+            out.push((*rect, label));
+        }
+        out
+    }
 }
 
 impl Component for StateTabsWidget {
@@ -64,7 +78,11 @@ impl Component for StateTabsWidget {
         let mut x = r.x;
         let mut tab_titles = Vec::with_capacity(STATE_TABS.len());
         for (i, t) in STATE_TABS.iter().enumerate() {
-            let label = capitalize_first_char(&t.to_string());
+            let label = match t {
+                State::Dashboard => "Browse".to_string(),
+                State::Normal => "Chat".to_string(),
+                State::Help => capitalize_first_char(&t.to_string()),
+            };
             let w = u16::try_from(label.chars().count() + 2).unwrap_or(6);
             self.tab_rects.push((Rect::new(x, r.y, w, 1), t.clone()));
             x = x.saturating_add(w);

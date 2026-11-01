@@ -3,6 +3,7 @@ use std::{
     collections::VecDeque,
     process::{Child, Command, Stdio},
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 use bon::bon;
@@ -17,8 +18,12 @@ use tokio::sync::{
 use tracing::{error, warn};
 use tui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     config::SharedCoreConfig,
@@ -26,7 +31,7 @@ use crate::{
         ApplyCommand, DecodedEmote, DownloadedEmotes, Emotes, SharedEmotes, display_emote,
         query_emotes,
     },
-    events::{Event, Events, InternalEvent, TwitchAction, TwitchEvent, TwitchNotification},
+    events::{Event, Events, InternalEvent, Key, TwitchAction, TwitchEvent, TwitchNotification},
     handlers::{
         audio::{SharedAudio, StreamAudio},
         data::{KNOWN_CHATTERS, MessageData},
@@ -38,7 +43,7 @@ use crate::{
     },
     twitch::oauth::TwitchOauth,
     ui::components::{Component, Components},
-    utils::sanitization::clean_channel_name,
+    utils::{sanitization::clean_channel_name, styles::NO_COLOR},
 };
 
 pub type SharedMessages = Rc<RefCell<VecDeque<MessageData>>>;
@@ -87,6 +92,13 @@ pub struct App {
     pub decoded_emotes_rx: Option<Receiver<Result<DecodedEmote, String>>>,
 
     pub running_stream: Option<Child>,
+
+    /// Whether the visual keybind overlay is currently shown
+    pub keybind_overlay_active: bool,
+    ///Whether the keybind overlay is pinned open (toggled with Space) vs hold-to-show
+    pub keybind_overlay_pinned: bool,
+    /// Last time a hold-to-show key event was received (for terminals without key-release events)
+    pub keybind_overlay_last_hold: Option<Instant>,
 }
 
 macro_rules! shared {
@@ -111,7 +123,10 @@ impl App {
         let first_state = config.terminal.first_state.clone();
 
         let storage = shared!(Storage::new(&config)?);
-        let duckdb = shared!(DuckDbStore::default());
+        let duckdb = shared!(DuckDbStore::with_max_messages(
+            crate::handlers::duckdb::default_duckdb_path(),
+            maximum_messages,
+        ));
         let filters = shared!(Filters::new(&config));
         let audio = shared!(StreamAudio::new(&config));
         let sidebar = shared!(SidebarState::new(&config));
@@ -126,13 +141,15 @@ impl App {
 
         {
             let mut tracked = config.frontend.favorite_channels.clone();
-            if let Ok(chans) = storage.borrow().get("channels") {
-                tracked.extend(chans);
-            }
-            tracked.extend(duckdb.borrow().known_channels());
-            sidebar
-                .borrow_mut()
-                .maybe_refresh(&initial_channel, tracked, &twitch_oauth, true);
+            tracked.extend(storage.borrow().followed_channels());
+            let unfollowed = storage.borrow().unfollowed_channels();
+            sidebar.borrow_mut().maybe_refresh(
+                &initial_channel,
+                tracked,
+                unfollowed,
+                &twitch_oauth,
+                true,
+            );
         }
 
         let mut components = Components::builder()
@@ -198,6 +215,9 @@ impl App {
             emotes_rx,
             decoded_emotes_rx,
             running_stream: None,
+            keybind_overlay_active: false,
+            keybind_overlay_pinned: false,
+            keybind_overlay_last_hold: None,
         };
         app.sync_window_title();
         Ok(app)
@@ -454,13 +474,12 @@ impl App {
                 self.audio.borrow_mut().set_channel(&channel);
                 {
                     let mut tracked = self.config.frontend.favorite_channels.clone();
-                    if let Ok(chans) = self.storage.borrow().get("channels") {
-                        tracked.extend(chans);
-                    }
-                    tracked.extend(self.duckdb.borrow().known_channels());
+                    tracked.extend(self.storage.borrow().followed_channels());
+                    let unfollowed = self.storage.borrow().unfollowed_channels();
                     self.sidebar.borrow_mut().maybe_refresh(
                         &channel,
                         tracked,
+                        unfollowed,
                         &self.twitch_oauth,
                         true,
                     );
@@ -588,6 +607,10 @@ impl Component for App {
             self.components.debug.draw(f, Some(*rect))?;
         }
 
+        if self.keybind_overlay_active {
+            self.draw_keybind_overlay(f);
+        }
+
         Ok(())
     }
 
@@ -598,6 +621,86 @@ impl Component for App {
 }
 
 impl App {
+    fn is_any_input_focused(&self) -> bool {
+        if self.components.debug.is_focused() {
+            return true;
+        }
+        match self.state {
+            State::Dashboard => self.components.dashboard.is_any_input_focused(),
+            State::Normal => self.components.chat.is_any_input_focused(),
+            State::Help => false,
+        }
+    }
+
+    fn draw_keybind_overlay(&self, f: &mut Frame) {
+        let full = f.area();
+        let mut badges: Vec<(Rect, String)> = Vec::new();
+
+        match self.state {
+            State::Dashboard => badges.extend(self.components.dashboard.keybind_badges()),
+            State::Normal => badges.extend(self.components.chat.keybind_badges()),
+            State::Help => {}
+        }
+
+        if self.config.frontend.state_tabs {
+            badges.extend(self.components.state_tabs.keybind_badges());
+        }
+
+        let badge_style = if *NO_COLOR {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            Style::default()
+                .bg(Color::Rgb(0xF5, 0x9E, 0x0B))
+                .fg(Color::Rgb(0x0F, 0x11, 0x1A))
+                .add_modifier(Modifier::BOLD)
+        };
+
+        for (target_rect, label) in badges {
+            let text = format!(" ⌨ {label} ");
+            let w = u16::try_from(UnicodeWidthStr::width(text.as_str()))
+                .unwrap_or(10)
+                .min(full.width);
+            if w == 0 || target_rect.y >= full.bottom() {
+                continue;
+            }
+            let x = target_rect.x.min(full.right().saturating_sub(w));
+            let badge_rect = Rect::new(x, target_rect.y, w, 1);
+            f.render_widget(Clear, badge_rect);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(text, badge_style))),
+                badge_rect,
+            );
+        }
+
+        // Top-center floating banner explaining hold/toggle state
+        let banner_text = if self.keybind_overlay_pinned {
+            " ⌨ KEYBIND OVERLAY PINNED — Press [Space], [`], or [Esc] to dismiss "
+        } else {
+            " ⌨ KEYBIND OVERLAY (Hold [`] or [Space] to view · Release to hide) "
+        };
+        let bw = u16::try_from(UnicodeWidthStr::width(banner_text))
+            .unwrap_or(50)
+            .min(full.width);
+        if bw > 0 && full.height >= 2 {
+            let bx = full.x.saturating_add(full.width.saturating_sub(bw) / 2);
+            let banner_rect = Rect::new(bx, full.y, bw, 1);
+            let banner_style = if *NO_COLOR {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default()
+                    .bg(Color::Rgb(0x91, 0x46, 0xFF))
+                    .fg(Color::Rgb(0xFF, 0xFF, 0xFF))
+                    .add_modifier(Modifier::BOLD)
+            };
+            f.render_widget(Clear, banner_rect);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(banner_text, banner_style)))
+                    .alignment(Alignment::Center),
+                banner_rect,
+            );
+        }
+    }
+
     async fn handle_event(&mut self, event: &Event) -> Result<bool> {
         let mut should_redraw = !matches!(event, Event::Tick);
 
@@ -613,6 +716,14 @@ impl App {
                     self.handle_twitch_notification(twitch_notification)?;
                 }
             },
+            Event::KeyRelease(key) => {
+                if matches!(key, Key::Char('`' | '~' | ' ')) && !self.keybind_overlay_pinned {
+                    self.keybind_overlay_active = false;
+                    self.keybind_overlay_last_hold = None;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
             Event::Input(key) => {
                 if self.components.debug.is_focused() {
                     self.components.debug.event(event).await?;
@@ -621,6 +732,46 @@ impl App {
 
                 if self.config.keybinds.toggle_debug_focus.contains(key) {
                     self.components.debug.toggle_focus();
+                }
+
+                if !self.is_any_input_focused() {
+                    match key {
+                        Key::Char('`' | '~') => {
+                            self.keybind_overlay_active = true;
+                            self.keybind_overlay_pinned = false;
+                            self.keybind_overlay_last_hold = Some(Instant::now());
+                            return Ok(true);
+                        }
+                        Key::Char(' ') => {
+                            if self.keybind_overlay_active && self.keybind_overlay_last_hold.is_some_and(|t| t.elapsed() < Duration::from_millis(600)) {
+                                // Holding Space down (key repeat) -> switch to hold-to-show mode
+                                self.keybind_overlay_pinned = false;
+                                self.keybind_overlay_last_hold = Some(Instant::now());
+                            } else if self.keybind_overlay_active && self.keybind_overlay_pinned {
+                                self.keybind_overlay_active = false;
+                                self.keybind_overlay_pinned = false;
+                                self.keybind_overlay_last_hold = None;
+                            } else {
+                                self.keybind_overlay_active = true;
+                                self.keybind_overlay_pinned = true;
+                                self.keybind_overlay_last_hold = Some(Instant::now());
+                            }
+                            return Ok(true);
+                        }
+                        Key::Esc if self.keybind_overlay_active => {
+                            self.keybind_overlay_active = false;
+                            self.keybind_overlay_pinned = false;
+                            self.keybind_overlay_last_hold = None;
+                            return Ok(true);
+                        }
+                        _ => {
+                            if self.keybind_overlay_active {
+                                self.keybind_overlay_active = false;
+                                self.keybind_overlay_pinned = false;
+                                self.keybind_overlay_last_hold = None;
+                            }
+                        }
+                    }
                 }
             }
             Event::Mouse(mouse) => {
@@ -646,7 +797,20 @@ impl App {
                 return Ok(true);
             }
             Event::Tick => {
+                if self.keybind_overlay_active
+                    && !self.keybind_overlay_pinned
+                    && self
+                        .keybind_overlay_last_hold
+                        .is_some_and(|t| t.elapsed() >= Duration::from_millis(850))
+                {
+                    self.keybind_overlay_active = false;
+                    self.keybind_overlay_last_hold = None;
+                    should_redraw = true;
+                }
                 if self.audio.borrow_mut().poll_status() {
+                    should_redraw = true;
+                }
+                if self.components.dashboard.poll_updates() {
                     should_redraw = true;
                 }
                 let mut sb = self.sidebar.borrow_mut();
@@ -655,11 +819,15 @@ impl App {
                 }
                 if sb.is_refresh_needed(&self.current_channel, false) {
                     let mut tracked = self.config.frontend.favorite_channels.clone();
-                    if let Ok(chans) = self.storage.borrow().get("channels") {
-                        tracked.extend(chans);
-                    }
-                    tracked.extend(self.duckdb.borrow().known_channels());
-                    if sb.maybe_refresh(&self.current_channel, tracked, &self.twitch_oauth, false) {
+                    tracked.extend(self.storage.borrow().followed_channels());
+                    let unfollowed = self.storage.borrow().unfollowed_channels();
+                    if sb.maybe_refresh(
+                        &self.current_channel,
+                        tracked,
+                        unfollowed,
+                        &self.twitch_oauth,
+                        false,
+                    ) {
                         should_redraw = true;
                     }
                 }

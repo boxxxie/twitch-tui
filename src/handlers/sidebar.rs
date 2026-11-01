@@ -23,7 +23,7 @@ use crate::{
     twitch::{api::TWITCH_API_BASE_URL, oauth::TwitchOauth},
     utils::{
         styles::{BORDER_DARK_STYLE, NO_COLOR, TEXT_DARK_STYLE, TITLE_STYLE},
-        text::{TitleStyle, title_line, title_line_with_rects},
+        text::{TitleStyle, title_line_with_rects},
     },
 };
 
@@ -37,6 +37,7 @@ pub const TOKEN_GENERATOR_URL: &str = "https://twitchtokengenerator.com/?scope=c
 pub enum SidebarClickAction {
     OpenInPlayer,
     JoinChannel(String),
+    ToggleFollow(String),
     OpenFollowingSearch,
     OpenTokenGeneratorUrl,
 }
@@ -82,10 +83,19 @@ impl StreamMetadata {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct CategoryMetadata {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SidebarSnapshot {
     pub current_stream: Option<StreamMetadata>,
     pub live_channels: Vec<StreamMetadata>,
     pub offline_channels: Vec<String>,
+    pub top_streams: Vec<StreamMetadata>,
+    pub top_streams_cursor: Option<String>,
+    pub top_categories: Vec<CategoryMetadata>,
     pub missing_follows_scope: bool,
 }
 
@@ -97,9 +107,11 @@ pub struct SidebarState {
     pub snapshot: SidebarSnapshot,
     pub scroll_offset: usize,
     stream_info_rect: Option<Rect>,
+    follow_btn_rect: Option<(Rect, String)>,
     following_rect: Option<Rect>,
     following_header_rect: Option<Rect>,
     channel_hitboxes: Vec<(Rect, String)>,
+    unfollow_hitboxes: Vec<(Rect, String)>,
     scope_hint_rect: Option<Rect>,
     last_refresh: Option<Instant>,
     tx: UnboundedSender<SidebarSnapshot>,
@@ -118,9 +130,16 @@ struct HelixStreamItem {
     tags: Vec<String>,
 }
 
+#[derive(Deserialize, Debug, Default)]
+struct HelixPagination {
+    cursor: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 struct HelixStreamList {
     data: Vec<HelixStreamItem>,
+    #[serde(default)]
+    pagination: HelixPagination,
 }
 
 #[derive(Deserialize, Debug)]
@@ -131,6 +150,8 @@ struct HelixFollowedChannel {
 #[derive(Deserialize, Debug)]
 struct HelixFollowedChannelList {
     data: Vec<HelixFollowedChannel>,
+    #[serde(default)]
+    pagination: HelixPagination,
 }
 
 #[derive(Deserialize, Debug)]
@@ -160,6 +181,36 @@ struct HelixChannelInfoList {
     data: Vec<HelixChannelInfoItem>,
 }
 
+#[derive(Deserialize, Debug)]
+struct HelixGameItem {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct HelixGameList {
+    data: Vec<HelixGameItem>,
+}
+
+#[derive(Deserialize, Debug)]
+struct HelixSearchChannelItem {
+    broadcaster_login: String,
+    display_name: String,
+    game_name: String,
+    title: String,
+    is_live: bool,
+    started_at: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct HelixSearchChannelList {
+    data: Vec<HelixSearchChannelItem>,
+    #[serde(default)]
+    pagination: HelixPagination,
+}
+
 impl SidebarState {
     #[must_use]
     pub fn new(config: &SharedCoreConfig) -> Self {
@@ -171,9 +222,11 @@ impl SidebarState {
             snapshot: SidebarSnapshot::default(),
             scroll_offset: 0,
             stream_info_rect: None,
+            follow_btn_rect: None,
             following_rect: None,
             following_header_rect: None,
             channel_hitboxes: Vec::new(),
+            unfollow_hitboxes: Vec::new(),
             scope_hint_rect: None,
             last_refresh: None,
             tx,
@@ -209,12 +262,24 @@ impl SidebarState {
         }
         let pos = Position::new(column, row);
 
+        if let Some((rect, channel)) = &self.follow_btn_rect {
+            if rect.contains(pos) {
+                return Some(SidebarClickAction::ToggleFollow(channel.clone()));
+            }
+        }
+
         if self.following_header_rect.is_some_and(|r| r.contains(pos)) {
             return Some(SidebarClickAction::OpenFollowingSearch);
         }
 
         if self.scope_hint_rect.is_some_and(|r| r.contains(pos)) {
             return Some(SidebarClickAction::OpenTokenGeneratorUrl);
+        }
+
+        for (rect, channel) in &self.unfollow_hitboxes {
+            if rect.contains(pos) {
+                return Some(SidebarClickAction::ToggleFollow(channel.clone()));
+            }
         }
 
         for (rect, channel) in &self.channel_hitboxes {
@@ -228,6 +293,42 @@ impl SidebarState {
         }
 
         None
+    }
+
+    #[must_use]
+    pub fn keybind_badges(&self) -> Vec<(Rect, String)> {
+        if !self.visible {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if let Some(r) = self.stream_info_rect {
+            out.push((
+                Rect::new(r.x.saturating_add(1), r.y, 14.min(r.width), 1),
+                "o: Watch".to_string(),
+            ));
+        }
+        if let Some((r, _)) = &self.follow_btn_rect {
+            out.push((*r, "u: Follow".to_string()));
+        }
+        if let Some(r) = self.following_header_rect {
+            out.push((
+                Rect::new(r.x.saturating_add(1), r.y, 16.min(r.width), 1),
+                "f: Following".to_string(),
+            ));
+        }
+        if let Some((r, _)) = self.channel_hitboxes.first() {
+            out.push((
+                Rect::new(r.x, r.y, 14.min(r.width), 1),
+                "Click: Join".to_string(),
+            ));
+        }
+        if let Some((r, _)) = self.unfollow_hitboxes.first() {
+            out.push((
+                Rect::new(r.x.saturating_sub(6), r.y, 10, 1),
+                "×: Unf".to_string(),
+            ));
+        }
+        out
     }
 
     pub fn poll_updates(&mut self) -> bool {
@@ -247,10 +348,66 @@ impl SidebarState {
             .is_none_or(|last| last.elapsed() >= REFRESH_INTERVAL)
     }
 
+    pub fn is_followed(&self, channel: &str) -> bool {
+        let clean = channel.trim().trim_start_matches('#');
+        self.snapshot
+            .live_channels
+            .iter()
+            .any(|s| s.user_login.eq_ignore_ascii_case(clean))
+            || self
+                .snapshot
+                .offline_channels
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(clean))
+    }
+
+    pub fn remove_followed_immediately(&mut self, channel: &str) {
+        let clean = channel.trim().trim_start_matches('#');
+        self.snapshot
+            .live_channels
+            .retain(|s| !s.user_login.eq_ignore_ascii_case(clean));
+        self.snapshot
+            .offline_channels
+            .retain(|c| !c.eq_ignore_ascii_case(clean));
+    }
+
+    pub fn add_followed_immediately(&mut self, channel: &str) {
+        let clean = channel.trim().trim_start_matches('#').to_lowercase();
+        if clean.is_empty() || self.is_followed(&clean) {
+            return;
+        }
+        if let Some(meta) = self
+            .snapshot
+            .top_streams
+            .iter()
+            .find(|s| s.user_login.eq_ignore_ascii_case(&clean))
+            .cloned()
+        {
+            self.snapshot.live_channels.push(meta);
+            self.snapshot
+                .live_channels
+                .sort_by_key(|a| std::cmp::Reverse(a.viewer_count));
+        } else if let Some(cur) = &self.snapshot.current_stream {
+            if cur.user_login.eq_ignore_ascii_case(&clean) && cur.is_live {
+                self.snapshot.live_channels.push(cur.clone());
+                self.snapshot
+                    .live_channels
+                    .sort_by_key(|a| std::cmp::Reverse(a.viewer_count));
+            } else {
+                self.snapshot.offline_channels.push(clean);
+                self.snapshot.offline_channels.sort();
+            }
+        } else {
+            self.snapshot.offline_channels.push(clean);
+            self.snapshot.offline_channels.sort();
+        }
+    }
+
     pub fn maybe_refresh(
         &mut self,
         current_channel: &str,
         tracked_channels: Vec<String>,
+        unfollowed_channels: Vec<String>,
         twitch_oauth: &TwitchOauth,
         force: bool,
     ) -> bool {
@@ -284,6 +441,7 @@ impl SidebarState {
                 &client,
                 &active_channel,
                 tracked_channels,
+                unfollowed_channels,
                 user_id.as_deref(),
                 has_follows_scope,
             )
@@ -352,13 +510,25 @@ impl SidebarState {
             TitleStyle::Single(" twt"),
             TitleStyle::Custom(status_span),
             TitleStyle::Single("Watch"),
+            TitleStyle::Single(if self.is_followed(&self.current_channel) {
+                "♥ Following (u)"
+            } else {
+                "♡ Follow (u)"
+            }),
         ];
+
+        let (title_line_spans, title_rects) =
+            title_line_with_rects(&title_spans, *TITLE_STYLE, area.x + 1, area.y);
+        self.follow_btn_rect = title_rects
+            .get(3)
+            .copied()
+            .map(|r| (r, self.current_channel.clone()));
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(config.frontend.border_type.clone().into())
             .border_style(*BORDER_DARK_STYLE)
-            .title(Line::from(title_line(&title_spans, *TITLE_STYLE)))
+            .title(Line::from(title_line_spans))
             .style(*TEXT_DARK_STYLE);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -485,6 +655,7 @@ impl SidebarState {
     fn draw_following_list(&mut self, f: &mut Frame, area: Rect, config: &SharedCoreConfig) {
         self.following_rect = Some(area);
         self.channel_hitboxes.clear();
+        self.unfollow_hitboxes.clear();
         self.scope_hint_rect = None;
 
         let emerald = Color::Rgb(0x50, 0xC8, 0x78);
@@ -545,6 +716,15 @@ impl SidebarState {
                 stream.game_name.as_str()
             };
 
+            let uptime_str = if uptime.is_empty() {
+                String::new()
+            } else {
+                format!(" · {uptime}")
+            };
+            let used_chars =
+                3 + stream.user_name.chars().count() + 3 + viewers.len() + uptime_str.len() + 3;
+            let pad_len = inner_width.saturating_sub(used_chars).max(1);
+
             let header = Line::from(vec![
                 Span::styled(
                     " ● ",
@@ -555,14 +735,9 @@ impl SidebarState {
                     format!(" ({viewers})"),
                     Style::default().fg(emerald).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    if uptime.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {uptime}")
-                    },
-                    Style::default().fg(text_muted),
-                ),
+                Span::styled(uptime_str, Style::default().fg(text_muted)),
+                Span::raw(" ".repeat(pad_len)),
+                Span::styled("[×]", Style::default().fg(text_muted)),
             ]);
 
             let prefix = format!("   {game}");
@@ -583,8 +758,19 @@ impl SidebarState {
 
             if cur_y < max_inner_y {
                 let row_h = 2.min(max_inner_y.saturating_sub(cur_y));
+                let full_w = area.width.saturating_sub(2);
+                let unf_w = 4u16.min(full_w);
+                self.unfollow_hitboxes.push((
+                    Rect::new(
+                        inner_x.saturating_add(full_w.saturating_sub(unf_w)),
+                        cur_y,
+                        unf_w,
+                        1,
+                    ),
+                    stream.user_login.clone(),
+                ));
                 self.channel_hitboxes.push((
-                    Rect::new(inner_x, cur_y, area.width.saturating_sub(2), row_h),
+                    Rect::new(inner_x, cur_y, full_w.saturating_sub(unf_w), row_h),
                     stream.user_login.clone(),
                 ));
                 cur_y = cur_y.saturating_add(row_h);
@@ -606,15 +792,29 @@ impl SidebarState {
                     Style::default().fg(text_offline)
                 };
                 if cur_y < max_inner_y {
+                    let full_w = area.width.saturating_sub(2);
+                    let unf_w = 4u16.min(full_w);
+                    self.unfollow_hitboxes.push((
+                        Rect::new(
+                            inner_x.saturating_add(full_w.saturating_sub(unf_w)),
+                            cur_y,
+                            unf_w,
+                            1,
+                        ),
+                        ch.clone(),
+                    ));
                     self.channel_hitboxes.push((
-                        Rect::new(inner_x, cur_y, area.width.saturating_sub(2), 1),
+                        Rect::new(inner_x, cur_y, full_w.saturating_sub(unf_w), 1),
                         ch.clone(),
                     ));
                     cur_y = cur_y.saturating_add(1);
                 }
+                let pad_len = inner_width.saturating_sub(ch.chars().count() + 6).max(1);
                 items.push(ListItem::new(Line::from(vec![
                     Span::styled(" ○ ", Style::default().fg(text_muted)),
                     Span::styled(ch.clone(), style),
+                    Span::raw(" ".repeat(pad_len)),
+                    Span::styled("[×]", Style::default().fg(text_muted)),
                 ])));
             }
         }
@@ -661,22 +861,29 @@ fn parse_helix_stream(item: HelixStreamItem) -> StreamMetadata {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Queries followed streams, followed channels, global top streams, and top categories in one snapshot pass"
+)]
 async fn fetch_sidebar_snapshot(
     client: &Client,
     active_channel: &str,
     tracked_channels: Vec<String>,
+    unfollowed_channels: Vec<String>,
     user_id: Option<&str>,
     has_follows_scope: bool,
 ) -> SidebarSnapshot {
     let mut live_map: HashMap<String, StreamMetadata> = HashMap::new();
     let mut all_known_logins: BTreeSet<String> = BTreeSet::new();
+    let unfollowed_set: BTreeSet<String> = unfollowed_channels
+        .into_iter()
+        .map(|ch| ch.trim().trim_start_matches('#').to_lowercase())
+        .filter(|ch| !ch.is_empty())
+        .collect();
 
-    if !active_channel.is_empty() {
-        all_known_logins.insert(active_channel.to_lowercase());
-    }
     for ch in tracked_channels {
         let clean = ch.trim().trim_start_matches('#').to_lowercase();
-        if !clean.is_empty() {
+        if !clean.is_empty() && !unfollowed_set.contains(&clean) {
             all_known_logins.insert(clean);
         }
     }
@@ -692,8 +899,10 @@ async fn fetch_sidebar_snapshot(
                     if let Ok(list) = resp.json::<HelixStreamList>().await {
                         for item in list.data {
                             let meta = parse_helix_stream(item);
-                            all_known_logins.insert(meta.user_login.clone());
-                            live_map.insert(meta.user_login.clone(), meta);
+                            if !unfollowed_set.contains(&meta.user_login) {
+                                all_known_logins.insert(meta.user_login.clone());
+                                live_map.insert(meta.user_login.clone(), meta);
+                            }
                         }
                     }
                 } else if resp.status().as_u16() == 401 {
@@ -701,19 +910,34 @@ async fn fetch_sidebar_snapshot(
                 }
             }
 
-            let all_follows_url =
-                format!("{TWITCH_API_BASE_URL}/channels/followed?user_id={uid}&first=100");
-            if let Ok(resp) = client.get(all_follows_url).send().await {
-                if let Ok(list) = resp.json::<HelixFollowedChannelList>().await {
-                    for item in list.data {
-                        all_known_logins.insert(item.broadcaster_login.to_lowercase());
+            let mut follows_cursor: Option<String> = None;
+            for _ in 0..5 {
+                let mut all_follows_url =
+                    format!("{TWITCH_API_BASE_URL}/channels/followed?user_id={uid}&first=100");
+                if let Some(cur) = &follows_cursor {
+                    let _ = write!(all_follows_url, "&after={cur}");
+                }
+                let Ok(resp) = client.get(all_follows_url).send().await else {
+                    break;
+                };
+                let Ok(list) = resp.json::<HelixFollowedChannelList>().await else {
+                    break;
+                };
+                for item in list.data {
+                    let login = item.broadcaster_login.to_lowercase();
+                    if !unfollowed_set.contains(&login) {
+                        all_known_logins.insert(login);
                     }
                 }
+                if list.pagination.cursor.is_none() {
+                    break;
+                }
+                follows_cursor = list.pagination.cursor;
             }
         }
     }
 
-    // Also query `/helix/streams?user_login=...` for any known channels not yet in `live_map`
+    // Also query `/helix/streams?user_login=...` for any followed channels not yet in `live_map`
     let logins_to_query: Vec<String> = all_known_logins
         .iter()
         .filter(|login| !live_map.contains_key(*login))
@@ -734,7 +958,9 @@ async fn fetch_sidebar_snapshot(
             if let Ok(list) = resp.json::<HelixStreamList>().await {
                 for item in list.data {
                     let meta = parse_helix_stream(item);
-                    live_map.insert(meta.user_login.clone(), meta);
+                    if !unfollowed_set.contains(&meta.user_login) {
+                        live_map.insert(meta.user_login.clone(), meta);
+                    }
                 }
             }
         }
@@ -744,13 +970,26 @@ async fn fetch_sidebar_snapshot(
     let current_stream = if let Some(live_meta) = live_map.get(&current_lower) {
         Some(live_meta.clone())
     } else if !current_lower.is_empty() {
-        fetch_offline_channel_metadata(client, &current_lower).await
+        let stream_url = format!("{TWITCH_API_BASE_URL}/streams?user_login={current_lower}");
+        let mut fetched_live = None;
+        if let Ok(resp) = client.get(stream_url).send().await {
+            if let Ok(list) = resp.json::<HelixStreamList>().await {
+                if let Some(item) = list.data.into_iter().next() {
+                    fetched_live = Some(parse_helix_stream(item));
+                }
+            }
+        }
+        if fetched_live.is_some() {
+            fetched_live
+        } else {
+            fetch_offline_channel_metadata(client, &current_lower).await
+        }
     } else {
         None
     };
 
     let mut live_channels: Vec<StreamMetadata> = live_map.into_values().collect();
-    live_channels.sort_by(|a, b| b.viewer_count.cmp(&a.viewer_count));
+    live_channels.sort_by_key(|a| std::cmp::Reverse(a.viewer_count));
 
     let offline_channels: Vec<String> = all_known_logins
         .into_iter()
@@ -761,12 +1000,179 @@ async fn fetch_sidebar_snapshot(
         })
         .collect();
 
+    let mut top_streams: Vec<StreamMetadata> = Vec::new();
+    let mut top_streams_cursor: Option<String> = None;
+    let top_streams_url = format!("{TWITCH_API_BASE_URL}/streams?first=36");
+    if let Ok(resp) = client.get(top_streams_url).send().await {
+        if let Ok(list) = resp.json::<HelixStreamList>().await {
+            top_streams_cursor = list.pagination.cursor;
+            for item in list.data {
+                top_streams.push(parse_helix_stream(item));
+            }
+        }
+    }
+
+    let mut top_categories: Vec<CategoryMetadata> = Vec::new();
+    let top_games_url = format!("{TWITCH_API_BASE_URL}/games/top?first=20");
+    if let Ok(resp) = client.get(top_games_url).send().await {
+        if let Ok(list) = resp.json::<HelixGameList>().await {
+            for g in list.data {
+                top_categories.push(CategoryMetadata {
+                    id: g.id,
+                    name: g.name,
+                });
+            }
+        }
+    }
+    if !top_categories
+        .iter()
+        .any(|c| c.id == "509659" || c.name.eq_ignore_ascii_case("ASMR"))
+    {
+        top_categories.insert(
+            0,
+            CategoryMetadata {
+                id: "509659".to_string(),
+                name: "ASMR".to_string(),
+            },
+        );
+    }
+
     SidebarSnapshot {
         current_stream,
         live_channels,
         offline_channels,
+        top_streams,
+        top_streams_cursor,
+        top_categories,
         missing_follows_scope,
     }
+}
+
+pub async fn fetch_top_streams_page(
+    twitch_oauth: &TwitchOauth,
+    after: Option<&str>,
+) -> (Vec<StreamMetadata>, Option<String>) {
+    let Some(client) = twitch_oauth.client() else {
+        return (Vec::new(), None);
+    };
+    let mut url = format!("{TWITCH_API_BASE_URL}/streams?first=36");
+    if let Some(cur) = after {
+        let _ = write!(url, "&after={cur}");
+    }
+    let Ok(resp) = client.get(url).send().await else {
+        return (Vec::new(), None);
+    };
+    let Ok(list) = resp.json::<HelixStreamList>().await else {
+        return (Vec::new(), None);
+    };
+    let streams = list.data.into_iter().map(parse_helix_stream).collect();
+    (streams, list.pagination.cursor)
+}
+
+pub async fn fetch_category_streams_page(
+    twitch_oauth: &TwitchOauth,
+    game_id: &str,
+    after: Option<&str>,
+) -> (Vec<StreamMetadata>, Option<String>) {
+    let Some(client) = twitch_oauth.client() else {
+        return (Vec::new(), None);
+    };
+    let mut url = format!("{TWITCH_API_BASE_URL}/streams?game_id={game_id}&first=36");
+    if let Some(cur) = after {
+        let _ = write!(url, "&after={cur}");
+    }
+    let Ok(resp) = client.get(url).send().await else {
+        return (Vec::new(), None);
+    };
+    let Ok(list) = resp.json::<HelixStreamList>().await else {
+        return (Vec::new(), None);
+    };
+    let streams = list.data.into_iter().map(parse_helix_stream).collect();
+    (streams, list.pagination.cursor)
+}
+
+pub async fn search_live_channels_page(
+    twitch_oauth: &TwitchOauth,
+    query: &str,
+    after: Option<&str>,
+) -> (Vec<StreamMetadata>, Option<String>) {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return (Vec::new(), None);
+    }
+    let Some(client) = twitch_oauth.client() else {
+        return (Vec::new(), None);
+    };
+    let mut req = client
+        .get(format!("{TWITCH_API_BASE_URL}/search/channels"))
+        .query(&[
+            ("query", trimmed),
+            ("live_only", "true"),
+            ("first", "36"),
+        ]);
+    if let Some(cur) = after {
+        req = req.query(&[("after", cur)]);
+    }
+    let Ok(resp) = req.send().await else {
+        return (Vec::new(), None);
+    };
+    let Ok(search_list) = resp.json::<HelixSearchChannelList>().await else {
+        return (Vec::new(), None);
+    };
+    if search_list.data.is_empty() {
+        return (Vec::new(), None);
+    }
+    let next_cursor = search_list.pagination.cursor;
+
+    let logins: Vec<String> = search_list
+        .data
+        .iter()
+        .map(|item| item.broadcaster_login.to_lowercase())
+        .take(36)
+        .collect();
+
+    let mut live_by_login: HashMap<String, StreamMetadata> = HashMap::new();
+    let mut stream_url = format!("{TWITCH_API_BASE_URL}/streams?");
+    for (idx, login) in logins.iter().enumerate() {
+        if idx > 0 {
+            stream_url.push('&');
+        }
+        let _ = write!(stream_url, "user_login={login}");
+    }
+    if let Ok(s_resp) = client.get(stream_url).send().await {
+        if let Ok(s_list) = s_resp.json::<HelixStreamList>().await {
+            for item in s_list.data {
+                let meta = parse_helix_stream(item);
+                live_by_login.insert(meta.user_login.clone(), meta);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for item in search_list.data {
+        let login = item.broadcaster_login.to_lowercase();
+        if let Some(meta) = live_by_login.remove(&login) {
+            out.push(meta);
+        } else if item.is_live {
+            let started_at = item
+                .started_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            out.push(StreamMetadata {
+                user_login: login,
+                user_name: item.display_name,
+                game_name: item.game_name,
+                title: item.title,
+                viewer_count: 0,
+                started_at,
+                tags: item.tags,
+                is_live: true,
+            });
+        }
+    }
+    out.sort_by_key(|a| std::cmp::Reverse(a.viewer_count));
+    (out, next_cursor)
 }
 
 async fn fetch_offline_channel_metadata(
