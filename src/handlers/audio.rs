@@ -397,7 +397,7 @@ impl StreamAudio {
                 "--hls-live-edge",
                 "3",
                 "--stream-segment-threads",
-                "2",
+                "1",
                 "--default-stream",
                 "audio_only,worst",
                 "--stdout",

@@ -438,7 +438,7 @@ fn query_terminal(command: &[u8]) -> Result<String> {
 }
 
 const SUPPORTED_TERMINALS: [&str; 2] = ["xterm-kitty", "xterm-ghostty"];
-const SUPPORTED_TERM_PROGRAMS: [&str; 4] = ["WarpTerminal", "ghostty", "kitty", "WezTerm"];
+const SUPPORTED_TERM_PROGRAMS: [&str; 2] = ["ghostty", "kitty"];
 
 static IS_TMUX: LazyLock<bool> = LazyLock::new(|| env::var("TMUX").is_ok());
 
@@ -614,7 +614,7 @@ mod tests {
     fn graphics_terminal_detection_supports_warp_and_ghostty() {
         assert!(is_graphics_capable_terminal_env(
             Some("xterm-256color"),
-            Some("WarpTerminal"),
+            Some("ghostty"),
             None
         ));
         assert!(is_graphics_capable_terminal_env(
@@ -629,7 +629,7 @@ mod tests {
         ));
         assert!(!is_graphics_capable_terminal_env(
             Some("xterm-256color"),
-            None,
+            Some("WarpTerminal"),
             None
         ));
     }

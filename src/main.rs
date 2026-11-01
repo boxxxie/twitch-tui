@@ -30,7 +30,7 @@ mod twitch;
 mod ui;
 mod utils;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<()> {
     color_eyre::install()?;
 

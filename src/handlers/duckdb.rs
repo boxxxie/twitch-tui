@@ -25,6 +25,20 @@ pub type SharedDuckDb = Rc<RefCell<DuckDbStore>>;
 
 static EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+const DEFAULT_MAX_MESSAGES_PER_CHANNEL: usize = 150;
+const HYDRATE_TAIL_ROW_SCAN_LIMIT: usize = 2500;
+
+const DUCKDB_LOW_MEMORY_SQL: &str = "\
+SET threads=1;
+SET external_threads=1;
+SET async_threads=1;
+SET preserve_insertion_order=false;
+SET memory_limit='8MB';
+SET allocator_flush_threshold='512KB';
+SET allocator_bulk_deallocation_flush_threshold='512KB';
+SET wal_autocheckpoint='256KB';
+";
+
 const SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS messages (
     id VARCHAR PRIMARY KEY,
@@ -119,6 +133,7 @@ enum SqlWorkerMsg {
 pub struct DuckDbStore {
     db_path: PathBuf,
     duckdb_bin: PathBuf,
+    max_messages_per_channel: usize,
     messages_by_channel: HashMap<String, VecDeque<MessageData>>,
     sql_tx: Option<Sender<SqlWorkerMsg>>,
 }
@@ -159,15 +174,22 @@ impl Default for DuckDbStore {
 impl DuckDbStore {
     #[must_use]
     pub fn new(db_path: PathBuf) -> Self {
+        Self::with_max_messages(db_path, DEFAULT_MAX_MESSAGES_PER_CHANNEL)
+    }
+
+    #[must_use]
+    pub fn with_max_messages(db_path: PathBuf, max_messages_per_channel: usize) -> Self {
         if let Some(parent) = db_path.parent() {
             drop(std::fs::create_dir_all(parent));
         }
 
         let duckdb_bin = resolve_duckdb_binary();
+        let max_messages = max_messages_per_channel.max(1);
 
         let mut store = Self {
             db_path,
             duckdb_bin,
+            max_messages_per_channel: max_messages,
             messages_by_channel: HashMap::new(),
             sql_tx: None,
         };
@@ -175,13 +197,15 @@ impl DuckDbStore {
         if store.db_path.exists() {
             store.hydrate_from_disk();
         } else {
+            let init_sql = format!("{DUCKDB_LOW_MEMORY_SQL}\n{SCHEMA_SQL}");
             drop(
                 Command::new(&store.duckdb_bin)
+                    .env("MALLOC_ARENA_MAX", "1")
                     .arg("-dark-mode")
                     .arg("-batch")
                     .arg(&store.db_path)
                     .arg("-c")
-                    .arg(SCHEMA_SQL)
+                    .arg(init_sql)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status(),
@@ -193,13 +217,30 @@ impl DuckDbStore {
     }
 
     fn hydrate_from_disk(&mut self) {
+        let per_channel_limit = self.max_messages_per_channel;
+        let tail_scan_limit = HYDRATE_TAIL_ROW_SCAN_LIMIT.max(per_channel_limit.saturating_mul(10));
+        let query_sql = format!(
+            "{DUCKDB_LOW_MEMORY_SQL}
+            SELECT raw_json FROM (
+                SELECT raw_json, epoch_ms
+                FROM (
+                    SELECT raw_json, channel, epoch_ms
+                    FROM messages
+                    ORDER BY rowid DESC
+                    LIMIT {tail_scan_limit}
+                )
+                QUALIFY row_number() OVER (PARTITION BY channel ORDER BY epoch_ms DESC) <= {per_channel_limit}
+            ) ORDER BY epoch_ms ASC;"
+        );
+
         let output = Command::new(&self.duckdb_bin)
+            .env("MALLOC_ARENA_MAX", "1")
             .arg("-dark-mode")
             .arg("-readonly")
             .arg("-json")
             .arg(&self.db_path)
             .arg("-c")
-            .arg("SELECT raw_json FROM messages ORDER BY epoch_ms ASC;")
+            .arg(query_sql)
             .output();
 
         let Ok(out) = output else {
@@ -223,11 +264,15 @@ impl DuckDbStore {
             let msg = persisted.into_message_data();
             let queue = self.messages_by_channel.entry(channel).or_default();
             queue.push_front(msg);
+            if queue.len() > per_channel_limit {
+                queue.truncate(per_channel_limit);
+            }
         }
     }
 
     fn start_persistent_worker(&mut self) {
         let Ok(mut child): Result<Child, _> = Command::new(&self.duckdb_bin)
+            .env("MALLOC_ARENA_MAX", "1")
             .arg("-dark-mode")
             .arg("-batch")
             .arg(&self.db_path)
@@ -257,7 +302,10 @@ impl DuckDbStore {
             });
         }
 
-        drop(writeln!(stdin, "{SCHEMA_SQL}"));
+        drop(writeln!(
+            stdin,
+            "CHECKPOINT;\n{DUCKDB_LOW_MEMORY_SQL}\n{SCHEMA_SQL}"
+        ));
         drop(stdin.flush());
 
         let (sql_tx, sql_rx) = mpsc::channel::<SqlWorkerMsg>();
@@ -385,11 +433,6 @@ impl DuckDbStore {
         self.messages_by_channel
             .get(&clean_channel)
             .map_or_else(VecDeque::new, |q| q.iter().take(limit).cloned().collect())
-    }
-
-    #[must_use]
-    pub fn known_channels(&self) -> Vec<String> {
-        self.messages_by_channel.keys().cloned().collect()
     }
 
     pub fn shutdown(&mut self) {
