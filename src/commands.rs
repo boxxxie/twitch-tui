@@ -10,7 +10,10 @@ use tui::{
     crossterm::{
         Command,
         cursor::{DisableBlinking, EnableBlinking, SetCursorStyle},
-        event::{DisableMouseCapture, EnableMouseCapture},
+        event::{
+            DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        },
         execute, queue,
         terminal::{
             EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
@@ -58,6 +61,8 @@ impl Command for ResetCursorShape {
 pub fn reset_terminal() -> Result<()> {
     disable_raw_mode()?;
 
+    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+
     execute!(
         stdout(),
         LeaveAlternateScreen,
@@ -95,6 +100,14 @@ pub fn init_terminal(frontend_config: &FrontendConfig) -> Result<DefaultTerminal
     }
 
     stdout.flush()?;
+
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
+    );
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;

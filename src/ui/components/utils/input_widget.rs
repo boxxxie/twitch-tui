@@ -112,6 +112,10 @@ impl<T: Clone> InputWidget<T> {
         self.input.update(s, s.len(), &mut self.input_listener);
     }
 
+    pub fn set_text(&mut self, s: &str) {
+        self.input.update(s, s.len(), &mut self.input_listener);
+    }
+
     pub fn is_valid(&self) -> bool {
         self.input_validator
             .as_ref()
@@ -237,23 +241,41 @@ impl<T: Clone> Component for InputWidget<T> {
 
     async fn event(&mut self, event: &Event) -> Result<()> {
         if let Event::Mouse(mouse) = event {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(r) = self.last_area {
-                    if r.contains(LayoutPosition::new(mouse.column, mouse.row)) {
-                        let rel_x = usize::from(mouse.column.saturating_sub(r.x.saturating_add(1)));
-                        let char_len = self.input.as_str().chars().count();
-                        if rel_x > char_len && self.suggestion.is_some() {
-                            self.accept_suggestion();
-                            self.input.move_end();
-                        } else {
-                            let byte_pos = self
-                                .input
-                                .as_str()
-                                .char_indices()
-                                .nth(rel_x)
-                                .map_or_else(|| self.input.len(), |(idx, _)| idx);
-                            self.input.set_pos(byte_pos);
+            if let Some(r) = self.last_area {
+                if r.contains(LayoutPosition::new(mouse.column, mouse.row)) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let cursor_pos = get_cursor_position(&self.input);
+                            let h_scroll = usize::from(
+                                u16::try_from(cursor_pos.saturating_add(3))
+                                    .unwrap_or(u16::MAX)
+                                    .saturating_sub(r.width),
+                            );
+                            let rel_x = usize::from(
+                                mouse.column.saturating_sub(r.x.saturating_add(1)),
+                            )
+                            .saturating_add(h_scroll);
+                            let char_len = self.input.as_str().chars().count();
+                            if rel_x > char_len && self.suggestion.is_some() {
+                                self.accept_suggestion();
+                                self.input.move_end();
+                            } else {
+                                let byte_pos = self
+                                    .input
+                                    .as_str()
+                                    .char_indices()
+                                    .nth(rel_x)
+                                    .map_or_else(|| self.input.len(), |(idx, _)| idx);
+                                self.input.set_pos(byte_pos);
+                            }
                         }
+                        MouseEventKind::ScrollUp => {
+                            self.input.move_to_prev_word(Word::Emacs, 1);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.input.move_to_next_word(At::AfterEnd, Word::Emacs, 1);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -301,10 +323,14 @@ impl<T: Clone> Component for InputWidget<T> {
                     self.input
                         .delete_prev_word(Word::Emacs, 1, &mut self.input_listener);
                 }
+                Key::CtrlDelete | Key::AltDelete | Key::Alt('d') => {
+                    self.input
+                        .delete_word(At::AfterEnd, Word::Emacs, 1, &mut self.input_listener);
+                }
                 key if keybinds.remove_item_to_right.contains(key) => {
                     self.input.delete(1, &mut self.input_listener);
                 }
-                Key::Backspace => {
+                Key::Backspace | Key::Ctrl('h') => {
                     self.input.backspace(1, &mut self.input_listener);
                 }
                 key if keybinds.fill_suggestion.contains(key) => {

@@ -15,6 +15,8 @@ pub enum Event {
     Tick,
     /// Crossterm events translated to internal key type events
     Input(Key),
+    /// Crossterm key release events (reported when Kitty keyboard protocol `REPORT_EVENT_TYPES` is supported)
+    KeyRelease(Key),
     /// Crossterm mouse events (clicks, scrolls, etc.) with cell coordinates
     Mouse(MouseEvent),
     /// Terminal window resize event

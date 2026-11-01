@@ -55,10 +55,16 @@ impl EventsThread {
                 match event::read() {
                     Ok(CEvent::Key(KeyEvent {
                         code,
-                        kind: KeyEventKind::Press,
+                        kind: KeyEventKind::Press | KeyEventKind::Repeat,
                         modifiers,
                         state: _,
-                    })) => self.translate_key_event(code, modifiers)?,
+                    })) => self.translate_key_event(code, modifiers, false)?,
+                    Ok(CEvent::Key(KeyEvent {
+                        code,
+                        kind: KeyEventKind::Release,
+                        modifiers,
+                        state: _,
+                    })) => self.translate_key_event(code, modifiers, true)?,
                     Ok(CEvent::Mouse(key)) => self.translate_mouse_event(key)?,
                     Ok(CEvent::Resize(_, _)) => self.send(Event::Resize)?,
                     _ => (),
@@ -76,17 +82,72 @@ impl EventsThread {
         Ok(())
     }
 
-    fn translate_key_event(&self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    fn translate_key_event(
+        &self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        is_release: bool,
+    ) -> Result<()> {
         let key = match code {
-            KeyCode::Backspace => Key::Backspace,
+            KeyCode::Backspace => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    Key::CtrlBackspace
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    Key::AltBackspace
+                } else {
+                    Key::Backspace
+                }
+            }
             KeyCode::Esc => Key::Esc,
-            KeyCode::Up => Key::Up,
-            KeyCode::Down => Key::Down,
-            KeyCode::Left => Key::Left,
-            KeyCode::Right => Key::Right,
+            KeyCode::Up => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    Key::CtrlUp
+                } else {
+                    Key::Up
+                }
+            }
+            KeyCode::Down => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    Key::CtrlDown
+                } else {
+                    Key::Down
+                }
+            }
+            KeyCode::Left => {
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    || modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    Key::CtrlLeft
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    Key::AltLeft
+                } else {
+                    Key::Left
+                }
+            }
+            KeyCode::Right => {
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    || modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    Key::CtrlRight
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    Key::AltRight
+                } else {
+                    Key::Right
+                }
+            }
             KeyCode::Home => Key::Home,
             KeyCode::End => Key::End,
-            KeyCode::Delete => Key::Delete,
+            KeyCode::PageUp => Key::PageUp,
+            KeyCode::PageDown => Key::PageDown,
+            KeyCode::Delete => {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    Key::CtrlDelete
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    Key::AltDelete
+                } else {
+                    Key::Delete
+                }
+            }
             KeyCode::Insert => Key::Insert,
             KeyCode::Tab => Key::Tab,
             KeyCode::Enter => Key::Enter,
@@ -99,7 +160,11 @@ impl EventsThread {
             _ => return Ok(()),
         };
 
-        self.send(Event::Input(key))?;
+        if is_release {
+            self.send(Event::KeyRelease(key))?;
+        } else {
+            self.send(Event::Input(key))?;
+        }
 
         Ok(())
     }

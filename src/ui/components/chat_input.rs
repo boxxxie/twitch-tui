@@ -7,7 +7,7 @@ use tui::{Frame, layout::Rect};
 use crate::{
     config::SharedCoreConfig,
     emotes::SharedEmotes,
-    events::{Event, InternalEvent, TwitchAction, TwitchEvent},
+    events::{Event, InternalEvent, Key, TwitchAction, TwitchEvent},
     handlers::storage::SharedStorage,
     ui::{
         components::{Component, EmotePickerWidget, utils::InputWidget},
@@ -16,12 +16,17 @@ use crate::{
     utils::text::first_similarity,
 };
 
+const MAX_SENT_HISTORY: usize = 50;
+
 pub struct ChatInputWidget {
     config: SharedCoreConfig,
     event_tx: Sender<Event>,
     storage: SharedStorage,
     input: InputWidget<SharedStorage>,
     emote_picker: EmotePickerWidget,
+    sent_history: Vec<String>,
+    history_idx: Option<usize>,
+    draft: String,
 }
 
 impl ChatInputWidget {
@@ -49,10 +54,8 @@ impl ChatInputWidget {
             Box::new(|s: String| -> String { format!("{} / {}", s.len(), TWITCH_MESSAGE_LIMIT) });
 
         let input_suggester = Box::new(|storage: SharedStorage, s: String| -> Option<String> {
-            let (command_str, command) = s.split_at_checked(1)?;
-
-            match command_str {
-                "/" => {
+            if let Some(command) = s.strip_prefix('/') {
+                if !command.contains(' ') {
                     let possible_suggestion = first_similarity(
                         &SUPPORTED_COMMANDS
                             .iter()
@@ -60,30 +63,37 @@ impl ChatInputWidget {
                             .collect::<Vec<String>>(),
                         command,
                     );
-
-                    let default_suggestion = possible_suggestion.clone();
-
-                    possible_suggestion.map_or(default_suggestion, |s| Some(format!("/{s}")))
+                    return possible_suggestion.map(|sug| format!("/{sug} "));
                 }
-                "@" => {
-                    let mentions = storage.borrow().get("mentions").ok()?;
-                    let channels = storage.borrow().get("channels").ok()?;
-
-                    let possible_suggestion = first_similarity(&mentions, command)
-                        .or_else(|| first_similarity(&channels, command));
-
-                    let default_suggestion = possible_suggestion.clone();
-
-                    possible_suggestion.map_or(default_suggestion, |s| Some(format!("@{s}")))
-                }
-                _ => None,
             }
+
+            // Support @mention completion both at the start of the message and after any space
+            let at_idx = s.rfind('@')?;
+            let before_at = &s[..at_idx];
+            if !before_at.is_empty() && !before_at.ends_with(' ') {
+                return None;
+            }
+            let partial = &s[at_idx + 1..];
+            if partial.is_empty() || partial.contains(' ') {
+                return None;
+            }
+
+            let storage_ref = storage.borrow();
+            let mentions = storage_ref.get("mentions").unwrap_or_default();
+            let chatters = storage_ref.get("chatters").unwrap_or_default();
+            let channels = storage_ref.get("channels").unwrap_or_default();
+
+            let matched = first_similarity(&mentions, partial)
+                .or_else(|| first_similarity(&chatters, partial))
+                .or_else(|| first_similarity(&channels, partial))?;
+
+            Some(format!("{before_at}@{matched} "))
         });
 
         let input = InputWidget::builder()
             .config(config.clone())
             .event_tx(event_tx.clone())
-            .title("Chat")
+            .title("Chat (Ctrl+←/→: Word · Ctrl+Bksp: Del Word · ↑/↓: History · Tab: Complete)")
             .input_validator((storage.clone(), input_validator))
             .visual_indicator(visual_indicator)
             .input_suggester((storage.clone(), input_suggester))
@@ -97,6 +107,9 @@ impl ChatInputWidget {
             storage,
             input,
             emote_picker,
+            sent_history: Vec::new(),
+            history_idx: None,
+            draft: String::new(),
         }
     }
 
@@ -170,13 +183,27 @@ impl Component for ChatInputWidget {
                         let current_input = self.input.to_string();
 
                         self.input.clear();
+                        self.history_idx = None;
+                        self.draft.clear();
 
-                        if let Some(message) = current_input.strip_prefix('@') {
-                            if self.config.storage.mentions {
-                                self.storage
-                                    .borrow_mut()
-                                    .add("mentions", message.to_string())
-                                    .context("Failed to add mention")?;
+                        if self.sent_history.last() != Some(&current_input) {
+                            if self.sent_history.len() >= MAX_SENT_HISTORY {
+                                self.sent_history.remove(0);
+                            }
+                            self.sent_history.push(current_input.clone());
+                        }
+
+                        if self.config.storage.mentions {
+                            for word in current_input.split_whitespace() {
+                                if let Some(mention) = word.strip_prefix('@') {
+                                    let clean = mention.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                                    if !clean.is_empty() {
+                                        self.storage
+                                            .borrow_mut()
+                                            .add("mentions", clean.to_string())
+                                            .context("Failed to add mention")?;
+                                    }
+                                }
                             }
                         }
 
@@ -185,6 +212,36 @@ impl Component for ChatInputWidget {
                                 current_input,
                             ))))
                             .await?;
+                    }
+                }
+                Key::Up | Key::Ctrl('p') => {
+                    if !self.sent_history.is_empty() {
+                        let next_idx = match self.history_idx {
+                            None => {
+                                self.draft = self.input.to_string();
+                                self.sent_history.len() - 1
+                            }
+                            Some(idx) => idx.saturating_sub(1),
+                        };
+                        self.history_idx = Some(next_idx);
+                        if let Some(msg) = self.sent_history.get(next_idx) {
+                            self.input.set_text(msg);
+                        }
+                    }
+                }
+                Key::Down | Key::Ctrl('n') => {
+                    if let Some(idx) = self.history_idx {
+                        if idx + 1 < self.sent_history.len() {
+                            let next_idx = idx + 1;
+                            self.history_idx = Some(next_idx);
+                            if let Some(msg) = self.sent_history.get(next_idx) {
+                                self.input.set_text(msg);
+                            }
+                        } else {
+                            self.history_idx = None;
+                            let draft = self.draft.clone();
+                            self.input.set_text(&draft);
+                        }
                     }
                 }
                 key if keybinds.toggle_emote_picker.contains(key) => {
@@ -196,6 +253,7 @@ impl Component for ChatInputWidget {
                     self.input.toggle_focus();
                 }
                 _ => {
+                    self.history_idx = None;
                     self.input.event(event).await?;
                 }
             }
@@ -231,5 +289,37 @@ mod tests {
         // Second click while already focused appends another mention
         widget.focus_with_mention("boxxy_queen_of_b");
         assert_eq!(widget.to_string(), "@BowmanDean @boxxy_queen_of_b ");
+    }
+
+    #[tokio::test]
+    async fn test_sent_history_and_word_navigation() {
+        let config = Arc::new(CoreConfig::default());
+        let (tx, mut rx) = mpsc::channel(10);
+        let storage = Rc::new(RefCell::new(Storage::new(&config).unwrap()));
+        let emotes = Rc::new(Emotes::new(false));
+
+        let mut widget = ChatInputWidget::new(config, tx, storage, emotes);
+        widget.focus_with_mention("alice");
+        widget.input.insert("hello world test");
+        assert_eq!(widget.to_string(), "@alice hello world test");
+
+        // Ctrl+Backspace removes previous word ("test")
+        widget
+            .event(&Event::Input(Key::CtrlBackspace))
+            .await
+            .unwrap();
+        assert_eq!(widget.to_string(), "@alice hello world ");
+
+        // Send first message
+        widget.event(&Event::Input(Key::Enter)).await.unwrap();
+        assert_eq!(widget.to_string(), "");
+        let _ = rx.recv().await;
+
+        // Type a draft, press Up to recall sent message, Down to restore draft
+        widget.input.insert("my draft");
+        widget.event(&Event::Input(Key::Up)).await.unwrap();
+        assert_eq!(widget.to_string(), "@alice hello world ");
+        widget.event(&Event::Input(Key::Down)).await.unwrap();
+        assert_eq!(widget.to_string(), "my draft");
     }
 }
