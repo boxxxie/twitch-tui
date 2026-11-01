@@ -6,6 +6,7 @@ use super::utils::SearchWidget;
 use crate::{
     config::SharedCoreConfig,
     events::Event,
+    handlers::storage::SharedStorage,
     twitch::{api::following::Following, oauth::TwitchOauth},
     ui::components::Component,
 };
@@ -28,8 +29,9 @@ impl FollowingWidget {
         config: SharedCoreConfig,
         twitch_oauth: TwitchOauth,
         event_tx: Sender<Event>,
+        storage: SharedStorage,
     ) -> Self {
-        let item_getter = Following::new(config.clone(), twitch_oauth);
+        let item_getter = Following::new(config.clone(), twitch_oauth, storage);
 
         let search_widget = SearchWidget::new(
             config,

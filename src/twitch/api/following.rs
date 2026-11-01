@@ -10,7 +10,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use super::TWITCH_API_BASE_URL;
-use crate::{config::SharedCoreConfig, twitch::oauth::TwitchOauth};
+use crate::{config::SharedCoreConfig, handlers::storage::SharedStorage, twitch::oauth::TwitchOauth};
 
 const FOLLOWER_COUNT: usize = 100;
 
@@ -57,17 +57,13 @@ impl From<StreamingUser> for FollowingUser {
 
 #[derive(Deserialize, Debug, Clone, Default)]
 struct Pagination {
-    #[expect(unused, reason = "Followed user pagination is not used yet")]
     cursor: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct FollowingChannelList {
     pub data: Vec<FollowingUser>,
-
-    #[expect(unused, reason = "Followed user pagination is not used yet")]
     pub total: u64,
-    #[expect(unused, reason = "Followed user pagination is not used yet")]
     pagination: Pagination,
 }
 
@@ -91,13 +87,19 @@ impl From<LiveChannelList> for FollowingChannelList {
 pub struct Following {
     pub config: SharedCoreConfig,
     pub twitch_oauth: TwitchOauth,
+    pub storage: SharedStorage,
 }
 
 impl Following {
-    pub const fn new(config: SharedCoreConfig, twitch_oauth: TwitchOauth) -> Self {
+    pub const fn new(
+        config: SharedCoreConfig,
+        twitch_oauth: TwitchOauth,
+        storage: SharedStorage,
+    ) -> Self {
         Self {
             config,
             twitch_oauth,
+            storage,
         }
     }
 }
@@ -108,34 +110,60 @@ pub async fn get_user_following(
     user_id: &str,
     live: bool,
 ) -> Result<FollowingChannelList> {
-    let channels = if live {
-        let url = format!(
-            "{TWITCH_API_BASE_URL}/streams/followed?user_id={user_id}&first={FOLLOWER_COUNT}",
-        );
-
-        client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<LiveChannelList>()
-            .await?
-            .into()
+    if live {
+        let mut combined = FollowingChannelList::default();
+        let mut cursor: Option<String> = None;
+        for _ in 0..5 {
+            let mut url = format!(
+                "{TWITCH_API_BASE_URL}/streams/followed?user_id={user_id}&first={FOLLOWER_COUNT}",
+            );
+            if let Some(cur) = &cursor {
+                url.push_str("&after=");
+                url.push_str(cur);
+            }
+            let page: FollowingChannelList = client
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<LiveChannelList>()
+                .await?
+                .into();
+            combined.data.extend(page.data);
+            combined.total = combined.data.len() as u64;
+            if page.pagination.cursor.is_none() {
+                break;
+            }
+            cursor = page.pagination.cursor;
+        }
+        Ok(combined)
     } else {
-        let url = format!(
-            "{TWITCH_API_BASE_URL}/channels/followed?user_id={user_id}&first={FOLLOWER_COUNT}",
-        );
-
-        client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<FollowingChannelList>()
-            .await?
-    };
-
-    Ok(channels)
+        let mut combined = FollowingChannelList::default();
+        let mut cursor: Option<String> = None;
+        for _ in 0..5 {
+            let mut url = format!(
+                "{TWITCH_API_BASE_URL}/channels/followed?user_id={user_id}&first={FOLLOWER_COUNT}",
+            );
+            if let Some(cur) = &cursor {
+                url.push_str("&after=");
+                url.push_str(cur);
+            }
+            let page = client
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<FollowingChannelList>()
+                .await?;
+            combined.total = page.total;
+            combined.data.extend(page.data);
+            if page.pagination.cursor.is_none() {
+                break;
+            }
+            cursor = page.pagination.cursor;
+        }
+        Ok(combined)
+    }
 }
 
 pub async fn get_following(twitch_oauth: TwitchOauth, live: bool) -> Result<FollowingChannelList> {

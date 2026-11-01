@@ -15,7 +15,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{SharedCoreConfig, get_data_dir};
 
-static ITEM_KEYS: &[&str] = &["channels", "mentions", "chatters", "last_channel"];
+static ITEM_KEYS: &[&str] = &[
+    "channels",
+    "mentions",
+    "chatters",
+    "last_channel",
+    "followed_channels",
+    "unfollowed_channels",
+];
 const DEFAULT_STORAGE_FILE_NAME: &str = "storage.json";
 
 pub type SharedStorage = Rc<RefCell<Storage>>;
@@ -57,7 +64,7 @@ impl Storage {
                     "channels" => storage_config.channels,
                     "mentions" => storage_config.mentions,
                     "chatters" => storage_config.chatters,
-                    "last_channel" => true,
+                    "last_channel" | "followed_channels" | "unfollowed_channels" => true,
                     _ => false,
                 };
                 items
@@ -82,7 +89,7 @@ impl Storage {
                 "channels" => storage_config.channels,
                 "mentions" => storage_config.mentions,
                 "chatters" => storage_config.chatters,
-                "last_channel" => true,
+                "last_channel" | "followed_channels" | "unfollowed_channels" => true,
                 _ => bail!("Invalid storage key {item_key}."),
             };
 
@@ -180,11 +187,48 @@ impl Storage {
             .get_mut(key)
             .context(format!("Item {value} could not be found within key {key}"))?;
 
-        let Some(position) = item.content.iter().position(|x| x == value) else {
+        let Some(position) = item
+            .content
+            .iter()
+            .position(|x| x.eq_ignore_ascii_case(value))
+        else {
             return Ok(None);
         };
 
-        Ok(Some(item.content.remove(position)))
+        let removed = item.content.remove(position);
+        let _ = self.dump_data();
+        Ok(Some(removed))
+    }
+
+    #[must_use]
+    pub fn followed_channels(&self) -> Vec<String> {
+        self.get("followed_channels").unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn unfollowed_channels(&self) -> Vec<String> {
+        self.get("unfollowed_channels").unwrap_or_default()
+    }
+
+    pub fn follow_channel(&mut self, channel: &str) {
+        let clean = channel.trim().trim_start_matches('#').to_lowercase();
+        if clean.is_empty() {
+            return;
+        }
+        let _ = self.remove_inner_with("unfollowed_channels", &clean);
+        let _ = self.add("followed_channels", clean);
+        let _ = self.dump_data();
+    }
+
+    pub fn unfollow_channel(&mut self, channel: &str) {
+        let clean = channel.trim().trim_start_matches('#').to_lowercase();
+        if clean.is_empty() {
+            return;
+        }
+        let _ = self.remove_inner_with("followed_channels", &clean);
+        let _ = self.remove_inner_with("channels", &clean);
+        let _ = self.add("unfollowed_channels", clean);
+        let _ = self.dump_data();
     }
 
     pub fn set_last_channel(&mut self, channel: &str) {

@@ -34,6 +34,8 @@ where
     T: ToString,
 {
     async fn get_items(&mut self) -> Result<Vec<T>>;
+
+    fn remove_item(&mut self, _item: &str) {}
 }
 
 pub struct SearchWidget<T, U>
@@ -399,6 +401,28 @@ where
                 }
                 key if keybinds.next_item.contains(key) => self.next()?,
                 key if keybinds.prev_item.contains(key) => self.previous(),
+                key if keybinds.delete_item.contains(key)
+                    || matches!(key, Key::Delete | Key::Char('u')) =>
+                {
+                    if let Some(index) = self.list_state.selected() {
+                        let target_str = if let Some(filtered) = &self.filtered_items {
+                            filtered.get(index).map(ToString::to_string)
+                        } else if let Ok(all) = &self.items {
+                            all.get(index).map(ToString::to_string)
+                        } else {
+                            None
+                        };
+                        if let Some(val) = target_str {
+                            self.item_getter.remove_item(&val);
+                            if let Ok(all) = &mut self.items {
+                                all.retain(|x| x.to_string() != val);
+                            }
+                            if let Some(filtered) = &mut self.filtered_items {
+                                filtered.retain(|x| x.to_string() != val);
+                            }
+                        }
+                    }
+                }
                 key if keybinds.select.contains(key) => {
                     self.select().await?;
                 }
