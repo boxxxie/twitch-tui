@@ -30,8 +30,7 @@ const CANDIDATE_PLAYERS: &[(&str, &[&str])] = &[
             "32768",
             "-analyzeduration",
             "0",
-            "-sync",
-            "ext",
+            "-infbuf",
             "-i",
             "-",
         ],
@@ -136,6 +135,11 @@ pub fn detect_default_audio_player() -> Vec<String> {
         "-autoexit".to_string(),
         "-loglevel".to_string(),
         "quiet".to_string(),
+        "-probesize".to_string(),
+        "32768".to_string(),
+        "-analyzeduration".to_string(),
+        "0".to_string(),
+        "-infbuf".to_string(),
         "-i".to_string(),
         "-".to_string(),
     ]
@@ -392,12 +396,12 @@ impl StreamAudio {
 
         let mut streamlink_child = match Command::new("streamlink")
             .args([
-                "--twitch-low-latency",
-                "--twitch-disable-ads",
                 "--hls-live-edge",
-                "3",
+                "4",
+                "--hls-playlist-reload-time",
+                "segment",
                 "--stream-segment-threads",
-                "1",
+                "2",
                 "--default-stream",
                 "audio_only,worst",
                 "--stdout",
