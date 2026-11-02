@@ -1115,13 +1115,13 @@ impl DashboardWidget {
                             cat.name,
                             self.category_streams.len()
                         ),
-                        "Scroll/j/k for more · Click category chip or Backspace to clear",
+                        "[/] : Next/Prev Category · Arrows/hjkl : Channels · Backspace : Clear",
                     )
                 } else {
                     (
                         "BROWSE TOP CATEGORIES & GAMES",
                         snap.top_categories.len().to_string(),
-                        "Click any category pill below to load live streams",
+                        "Press [ or ] (or click a category pill) to filter by category",
                     )
                 }
             }
@@ -1653,7 +1653,7 @@ impl DashboardWidget {
         }
 
         if let Some((cat_rect, _)) = self.category_hitboxes.first() {
-            out.push((*cat_rect, "←/→ : Category".to_string()));
+            out.push((*cat_rect, "[ / ] : Category".to_string()));
         }
 
         for (i, (card_rect, _)) in self.card_hitboxes.iter().enumerate() {
@@ -2084,6 +2084,26 @@ impl Component for DashboardWidget {
                     }
                 }
                 Key::Right | Key::Char('l') => {
+                    if !all_channels.is_empty() {
+                        let grid_len = self.active_grid_streams().len();
+                        if grid_len > 0 && self.selected_idx + 1 >= grid_len {
+                            self.maybe_load_more();
+                        }
+                        self.selected_idx = (self.selected_idx + 1) % all_channels.len();
+                        self.sync_card_scroll_to_selection();
+                    }
+                }
+                Key::Left | Key::Char('h') => {
+                    if !all_channels.is_empty() {
+                        self.selected_idx = if self.selected_idx == 0 {
+                            all_channels.len() - 1
+                        } else {
+                            self.selected_idx - 1
+                        };
+                        self.sync_card_scroll_to_selection();
+                    }
+                }
+                Key::Char(']') | Key::CtrlRight | Key::AltRight => {
                     if self.browse_tab == BrowseTab::Categories {
                         let cats = self.sidebar.borrow().snapshot.top_categories.clone();
                         if !cats.is_empty() {
@@ -2096,16 +2116,9 @@ impl Component for DashboardWidget {
                                 self.select_category(next_cat);
                             }
                         }
-                    } else if !all_channels.is_empty() {
-                        let grid_len = self.active_grid_streams().len();
-                        if grid_len > 0 && self.selected_idx + 1 >= grid_len {
-                            self.maybe_load_more();
-                        }
-                        self.selected_idx = (self.selected_idx + 1) % all_channels.len();
-                        self.sync_card_scroll_to_selection();
                     }
                 }
-                Key::Left | Key::Char('h') => {
+                Key::Char('[') | Key::CtrlLeft | Key::AltLeft => {
                     if self.browse_tab == BrowseTab::Categories {
                         let cats = self.sidebar.borrow().snapshot.top_categories.clone();
                         if !cats.is_empty() {
@@ -2118,13 +2131,6 @@ impl Component for DashboardWidget {
                                 self.select_category(prev_cat);
                             }
                         }
-                    } else if !all_channels.is_empty() {
-                        self.selected_idx = if self.selected_idx == 0 {
-                            all_channels.len() - 1
-                        } else {
-                            self.selected_idx - 1
-                        };
-                        self.sync_card_scroll_to_selection();
                     }
                 }
                 key if keybinds.join.contains(key) => {

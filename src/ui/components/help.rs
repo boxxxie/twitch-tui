@@ -45,6 +45,14 @@ impl HelpWidget {
                 "Switch Browse view (Following / Top Live / Categories / Search)",
             ),
             (
+                "Arrows / h, j, k, l".to_string(),
+                "Navigate across live stream cards and channels",
+            ),
+            (
+                "[ / ] (or Ctrl+Left / Ctrl+Right)".to_string(),
+                "Cycle through categories in the Categories tab",
+            ),
+            (
                 "/".to_string(),
                 "Search live Twitch channels and categories",
             ),
