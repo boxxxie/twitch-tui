@@ -167,6 +167,7 @@ pub async fn handle_incoming_message(
         .clone();
 
     let message_emotes = emotes.await.into_iter().flatten().collect();
+    let chatter_color = event.color();
 
     event_tx
         .send(
@@ -178,6 +179,7 @@ pub async fn handle_incoming_message(
                 Some(message_id),
                 highlight,
                 badges,
+                chatter_color,
             )
             .into(),
         )

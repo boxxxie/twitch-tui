@@ -72,8 +72,8 @@ datetime_format = "%a %b %e %T %Y"
 # If usernames should be shown in the chat window.
 username_shown = true
 # The color palette for usernames.
-# Options: pastel, vibrant, warm, and cool.
-palette = "pastel"
+# Options: twitch, pastel, vibrant, warm, and cool.
+palette = "twitch"
 # Show the title values at the top of the terminal.
 title_shown = true
 # The amount of space between the chat window and the terminal border.

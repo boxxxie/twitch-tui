@@ -193,6 +193,14 @@ impl ReceivedTwitchEvent {
         self.chatter_user_name.as_ref()
     }
 
+    pub fn color(&self) -> Option<String> {
+        self.color
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    }
+
     pub const fn message_id(&self) -> Option<&String> {
         self.message_id.as_ref()
     }

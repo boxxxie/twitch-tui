@@ -7,7 +7,13 @@ use crate::{
 
 impl ValueEnum for Palette {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Pastel, Self::Vibrant, Self::Warm, Self::Cool]
+        &[
+            Self::Pastel,
+            Self::Vibrant,
+            Self::Warm,
+            Self::Cool,
+            Self::Twitch,
+        ]
     }
 
     fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
@@ -16,6 +22,7 @@ impl ValueEnum for Palette {
             Self::Vibrant => "vibrant",
             Self::Warm => "warm",
             Self::Cool => "cool",
+            Self::Twitch => "twitch",
         }))
     }
 }

@@ -16,14 +16,14 @@ use crate::{
     emotes::{DownloadedEmotes, EmoteData, SharedEmotes, display_emote, load_emote, overlay_emote},
     events::{Event, TwitchEvent, TwitchNotification},
     utils::{
-        colors::{hsl_to_rgb, u32_to_color},
+        colors::{hsl_to_rgb, parse_hex_color, twitch_default_color, u32_to_color},
         emotes::{
             PRIVATE_USE_UNICODE, UnicodePlaceholder, ZERO_WIDTH_SPACE, ZERO_WIDTH_SPACE_STR,
             get_emote_offset,
         },
         search::FUZZY_FINDER,
         styles::{
-            DATETIME_DARK_STYLE, DATETIME_LIGHT_STYLE, HIGHLIGHT_NAME_DARK_STYLE,
+            BOLD, DATETIME_DARK_STYLE, DATETIME_LIGHT_STYLE, HIGHLIGHT_NAME_DARK_STYLE,
             HIGHLIGHT_NAME_LIGHT_STYLE, SEARCH_STYLE, SYSTEM_CHAT_STYLE,
         },
         text::{ format_relative_time, split_cow_in_place },
@@ -46,6 +46,7 @@ pub struct MessageData {
     pub message_id: Option<String>,
     pub highlight: bool,
     pub badges: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,7 @@ pub struct RawMessageData {
     pub message_id: Option<String>,
     pub highlight: bool,
     pub badges: Option<String>,
+    pub color: Option<String>,
 }
 
 #[bon]
@@ -73,6 +75,7 @@ impl RawMessageData {
         message_id: Option<String>,
         highlight: bool,
         badges: Option<String>,
+        color: Option<String>,
     ) -> Self {
         Self {
             time_sent: Local::now(),
@@ -84,6 +87,7 @@ impl RawMessageData {
             message_id,
             highlight,
             badges,
+            color,
         }
     }
 }
@@ -110,6 +114,7 @@ impl MessageData {
             message_id: msg.message_id,
             highlight: msg.highlight,
             badges: msg.badges,
+            color: msg.color,
         }
     }
 
@@ -264,6 +269,16 @@ impl MessageData {
     }
 
     fn hash_username(&self, palette: &Palette) -> Color {
+        if let Some(color_hex) = self.color.as_deref() {
+            if let Some(rgb) = parse_hex_color(color_hex) {
+                return rgb;
+            }
+        }
+
+        if matches!(palette, Palette::Twitch) {
+            return twitch_default_color(&self.author);
+        }
+
         let hash = f64::from(
             self.author
                 .as_bytes()
@@ -273,7 +288,7 @@ impl MessageData {
         );
 
         let (hue, saturation, lightness) = match palette {
-            Palette::Pastel => (hash % 360. + 1., 0.5, 0.75),
+            Palette::Pastel | Palette::Twitch => (hash % 360. + 1., 0.5, 0.75),
             Palette::Vibrant => (hash % 360. + 1., 1., 0.6),
             Palette::Warm => ((hash % 100. + 1.) * 1.2, 0.8, 0.7),
             Palette::Cool => ((hash % 100. + 1.).mul_add(1.2, 180.), 0.6, 0.7),
@@ -437,8 +452,14 @@ impl MessageData {
             Theme::Dark => *HIGHLIGHT_NAME_DARK_STYLE,
             Theme::Light => *HIGHLIGHT_NAME_LIGHT_STYLE,
         };
+        let is_own_author = !self.system
+            && username_highlight
+                .is_some_and(|name| !name.is_empty() && self.author.eq_ignore_ascii_case(name));
+
         let author_theme = if self.system {
             *SYSTEM_CHAT_STYLE
+        } else if is_own_author {
+            Style::default().fg(fg).add_modifier(*BOLD)
         } else {
             Style::default().fg(fg)
         };
@@ -647,6 +668,10 @@ pub static KNOWN_CHATTERS: &[&str] = &["System", "Twitch"];
 
 impl DataBuilder {
     // User messages that come from either twitch or the terminal
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Constructs a user chat notification with full EventSub metadata"
+    )]
     pub fn user(
         user: String,
         user_id: Option<String>,
@@ -655,6 +680,7 @@ impl DataBuilder {
         message_id: Option<String>,
         highlight: bool,
         badges: Option<String>,
+        color: Option<String>,
     ) -> TwitchNotification {
         let message = RawMessageData::builder()
             .author(user)
@@ -665,6 +691,7 @@ impl DataBuilder {
             .maybe_message_id(message_id)
             .highlight(highlight)
             .maybe_badges(badges)
+            .maybe_color(color)
             .build();
 
         TwitchNotification::Message(message)
@@ -724,9 +751,46 @@ mod tests {
                 message_id: None,
                 highlight: false,
                 badges: None,
+                color: None,
             }
             .hash_username(&Palette::Pastel),
             Rgb(159, 223, 221)
+        );
+    }
+
+    #[test]
+    fn test_twitch_color_and_own_author_bold() {
+        let emotes = Rc::new(Emotes::new(false));
+        let frontendconfig = FrontendConfig {
+            show_datetimes: false,
+            palette: Palette::Twitch,
+            ..FrontendConfig::default()
+        };
+
+        let own_msg = MessageData::from_twitch_message(
+            RawMessageData::builder()
+                .author("boxxy_queen_of_b".to_string())
+                .maybe_user_id(None)
+                .system(false)
+                .payload("hi chat".to_string())
+                .emotes(BTreeMap::new())
+                .maybe_message_id(None)
+                .highlight(false)
+                .maybe_badges(None)
+                .color("#00FF7F".to_string())
+                .build(),
+            &emotes,
+        );
+
+        let lines = own_msg.to_vec(&frontendconfig, 80, None, Some("boxxy_queen_of_b"));
+        assert_eq!(
+            lines[0].spans[0],
+            Span::styled(
+                "boxxy_queen_of_b",
+                Style::default()
+                    .fg(Rgb(0x00, 0xFF, 0x7F))
+                    .add_modifier(*BOLD)
+            )
         );
     }
 

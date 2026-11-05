@@ -204,7 +204,7 @@ impl From<FrontendConfig> for Vec<(String, String)> {
     }
 }
 
-#[derive(Serialize, DeserializeFromStr, Debug, Clone)]
+#[derive(Serialize, DeserializeFromStr, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum Palette {
@@ -213,6 +213,7 @@ pub enum Palette {
     Vibrant,
     Warm,
     Cool,
+    Twitch,
 }
 
 impl FromStr for Palette {
@@ -224,6 +225,7 @@ impl FromStr for Palette {
             "vibrant" => Ok(Self::Vibrant),
             "warm" => Ok(Self::Warm),
             "cool" => Ok(Self::Cool),
+            "twitch" => Ok(Self::Twitch),
             _ => bail!("Palette '{}' cannot be deserialized", s),
         }
     }

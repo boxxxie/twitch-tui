@@ -78,6 +78,8 @@ pub struct PersistedMessage {
     pub message_id: Option<String>,
     pub highlight: bool,
     pub badges: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 impl PersistedMessage {
@@ -104,6 +106,7 @@ impl PersistedMessage {
             message_id: msg.message_id.clone(),
             highlight: msg.highlight,
             badges: msg.badges.clone(),
+            color: msg.color.clone(),
         }
     }
 
@@ -119,6 +122,7 @@ impl PersistedMessage {
             message_id: self.message_id,
             highlight: self.highlight,
             badges: self.badges,
+            color: self.color,
         }
     }
 }
@@ -473,6 +477,7 @@ mod tests {
             message_id: Some("msg-123".to_string()),
             highlight: false,
             badges: None,
+            color: Some("#FF69B4".to_string()),
         };
 
         let persisted = PersistedMessage::from_message_data("BowmanDean", &msg);
@@ -482,5 +487,6 @@ mod tests {
         let restored = persisted.into_message_data();
         assert_eq!(restored.author, "boxxy_queen_of_b");
         assert_eq!(restored.payload, "hello duckdb");
+        assert_eq!(restored.color.as_deref(), Some("#FF69B4"));
     }
 }
