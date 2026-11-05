@@ -142,6 +142,15 @@ impl ChatInputWidget {
             self.input.insert(&prefix);
         }
     }
+
+    pub fn restore_draft(&mut self, draft: &str, focused: bool) {
+        if !draft.is_empty() {
+            self.input.set_text(draft);
+        }
+        if focused != self.input.is_focused() {
+            self.input.toggle_focus();
+        }
+    }
 }
 
 impl Display for ChatInputWidget {

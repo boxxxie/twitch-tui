@@ -25,6 +25,7 @@ mod config;
 mod emotes;
 mod events;
 mod handlers;
+mod hot_reload;
 mod logging;
 mod twitch;
 mod ui;
@@ -73,9 +74,13 @@ async fn main() -> Result<()> {
     TwitchWebsocket::new(config.clone(), twitch_oauth, event_tx.clone(), twitch_rx);
 
     let terminal = init_terminal(&config.frontend)?;
-    app.run(terminal).await?;
+    let reload_state_file = app.run(terminal).await?;
 
     reset_terminal()?;
+
+    if let Some(state_file) = reload_state_file {
+        hot_reload::exec_new_binary(&state_file)?;
+    }
 
     std::process::exit(0)
 }

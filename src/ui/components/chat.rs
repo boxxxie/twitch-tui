@@ -143,6 +143,15 @@ impl ChatWidget {
     }
 
     #[must_use]
+    pub fn chat_input_state(&self) -> (bool, String) {
+        (self.chat_input.is_focused(), self.chat_input.to_string())
+    }
+
+    pub fn restore_chat_input(&mut self, draft: &str, focused: bool) {
+        self.chat_input.restore_draft(draft, focused);
+    }
+
+    #[must_use]
     pub fn keybind_badges(&self) -> Vec<(Rect, String)> {
         let mut out = Vec::new();
         let kb = &self.config.keybinds.normal;

@@ -181,10 +181,16 @@ impl StreamAudio {
         }
     }
 
-    #[cfg(test)]
     #[must_use]
     pub const fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.stop();
+        }
     }
 
     #[must_use]

@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::VecDeque,
+    path::PathBuf,
     process::{Child, Command, Stdio},
     rc::Rc,
     time::{Duration, Instant},
@@ -41,6 +42,7 @@ use crate::{
         state::State,
         storage::{SharedStorage, Storage},
     },
+    hot_reload::{BinaryWatcher, HotReloadState},
     twitch::oauth::TwitchOauth,
     ui::components::{Component, Components},
     utils::{sanitization::clean_channel_name, styles::NO_COLOR},
@@ -99,6 +101,10 @@ pub struct App {
     pub keybind_overlay_pinned: bool,
     /// Last time a hold-to-show key event was received (for terminals without key-release events)
     pub keybind_overlay_last_hold: Option<Instant>,
+
+    /// Watches the on-disk executable for newly compiled builds and triggers `execv` hot-reload
+    pub binary_watcher: BinaryWatcher,
+    pub pending_hot_reload: bool,
 }
 
 macro_rules! shared {
@@ -120,7 +126,10 @@ impl App {
         decoded_emotes_rx: Option<Receiver<Result<DecodedEmote, String>>>,
     ) -> Result<Self> {
         let maximum_messages = config.terminal.maximum_messages;
-        let first_state = config.terminal.first_state.clone();
+        let restored_reload = HotReloadState::load_from_env();
+        let first_state = restored_reload
+            .as_ref()
+            .map_or_else(|| config.terminal.first_state.clone(), |r| r.state.clone());
 
         let storage = shared!(Storage::new(&config)?);
         let duckdb = shared!(DuckDbStore::with_max_messages(
@@ -130,14 +139,20 @@ impl App {
         let filters = shared!(Filters::new(&config));
         let audio = shared!(StreamAudio::new(&config));
         let sidebar = shared!(SidebarState::new(&config));
-        let initial_channel = storage
-            .borrow()
-            .last_channel()
+        let initial_channel = restored_reload
+            .as_ref()
+            .map(|r| r.current_channel.clone())
+            .or_else(|| storage.borrow().last_channel())
             .unwrap_or_else(|| clean_channel_name(&config.twitch.channel));
         let initial_messages = duckdb
             .borrow()
             .load_channel_messages(&initial_channel, maximum_messages);
         let messages = shared!(initial_messages);
+
+        if let Some(ref reload) = restored_reload {
+            audio.borrow_mut().set_enabled(reload.audio_enabled);
+            sidebar.borrow_mut().visible = reload.sidebar_visible;
+        }
 
         {
             let mut tracked = config.frontend.favorite_channels.clone();
@@ -170,7 +185,30 @@ impl App {
             .clone_from(&initial_channel);
         components.state_tabs.select(&first_state);
 
-        let connected_channel = if first_state == State::Normal {
+        if let Some(ref reload) = restored_reload {
+            components.chat.scroll_offset.jump_to(reload.scroll_offset);
+            components
+                .chat
+                .restore_chat_input(&reload.chat_input_draft, reload.chat_input_focused);
+        }
+
+        let connected_channel = if let Some(ref reload) = restored_reload {
+            if let Some(ref conn_ch) = reload.connected_channel {
+                if reload.audio_enabled {
+                    audio.borrow_mut().play(conn_ch);
+                }
+                let _ = twitch_tx.try_send(TwitchAction::JoinChannel(conn_ch.clone()));
+                Some(conn_ch.clone())
+            } else if first_state == State::Normal {
+                if reload.audio_enabled {
+                    audio.borrow_mut().play(&initial_channel);
+                }
+                let _ = twitch_tx.try_send(TwitchAction::JoinChannel(initial_channel.clone()));
+                Some(initial_channel.clone())
+            } else {
+                None
+            }
+        } else if first_state == State::Normal {
             if config.frontend.audio {
                 audio.borrow_mut().play(&initial_channel);
             }
@@ -218,6 +256,8 @@ impl App {
             keybind_overlay_active: false,
             keybind_overlay_pinned: false,
             keybind_overlay_last_hold: None,
+            binary_watcher: BinaryWatcher::new(),
+            pending_hot_reload: false,
         };
         app.sync_window_title();
         Ok(app)
@@ -331,10 +371,25 @@ impl App {
         self.sync_window_title();
     }
 
-    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    fn snapshot_hot_reload_state(&self) -> HotReloadState {
+        let (chat_input_focused, chat_input_draft) = self.components.chat.chat_input_state();
+        HotReloadState {
+            state: self.state.clone(),
+            current_channel: self.current_channel.clone(),
+            connected_channel: self.connected_channel.clone(),
+            scroll_offset: self.components.chat.scroll_offset.get_offset(),
+            chat_input_focused,
+            chat_input_draft,
+            audio_enabled: self.audio.borrow().is_enabled(),
+            sidebar_visible: self.sidebar.borrow().visible,
+        }
+    }
+
+    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<Option<PathBuf>> {
         let is_emotes_enabled = self.emotes.enabled;
         let mut needs_redraw = true;
         let mut last_periodic_redraw = std::time::Instant::now();
+        let mut last_binary_check = std::time::Instant::now();
 
         while self.running {
             if needs_redraw {
@@ -357,15 +412,29 @@ impl App {
                 needs_redraw = true;
             }
 
+            if last_binary_check.elapsed() >= std::time::Duration::from_millis(1500) {
+                last_binary_check = std::time::Instant::now();
+                if self.binary_watcher.is_binary_updated() {
+                    self.pending_hot_reload = true;
+                    self.running = false;
+                }
+            }
+
             // Refresh relative time labels ("Xm ago") and header clock at least every 5s
             if last_periodic_redraw.elapsed() >= std::time::Duration::from_secs(5) {
                 needs_redraw = true;
             }
         }
 
+        let reload_file = if self.pending_hot_reload {
+            Some(self.snapshot_hot_reload_state().save_to_disk()?)
+        } else {
+            None
+        };
+
         self.cleanup()?;
 
-        Ok(())
+        Ok(reload_file)
     }
 
     fn handle_emote_event(&mut self) -> bool {
@@ -763,6 +832,11 @@ impl App {
                             self.keybind_overlay_pinned = false;
                             self.keybind_overlay_last_hold = None;
                             return Ok(true);
+                        }
+                        Key::Char('R') => {
+                            self.pending_hot_reload = true;
+                            self.running = false;
+                            return Ok(false);
                         }
                         _ => {
                             if self.keybind_overlay_active {
