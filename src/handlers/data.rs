@@ -16,7 +16,9 @@ use crate::{
     emotes::{DownloadedEmotes, EmoteData, SharedEmotes, display_emote, load_emote, overlay_emote},
     events::{Event, TwitchEvent, TwitchNotification},
     utils::{
-        colors::{hsl_to_rgb, parse_hex_color, twitch_default_color, u32_to_color},
+        colors::{
+            ensure_readable_color, hsl_to_rgb, parse_hex_color, twitch_default_color, u32_to_color,
+        },
         emotes::{
             PRIVATE_USE_UNICODE, UnicodePlaceholder, ZERO_WIDTH_SPACE, ZERO_WIDTH_SPACE_STR,
             get_emote_offset,
@@ -441,7 +443,10 @@ impl MessageData {
         username_highlight: Option<&str>,
     ) -> Vec<Line<'_>> {
         // Theme styles
-        let fg = self.hash_username(&frontend_config.palette);
+        let fg = ensure_readable_color(
+            self.hash_username(&frontend_config.palette),
+            &frontend_config.theme,
+        );
 
         let message_theme = if self.highlight {
             Style::default().fg(fg).add_modifier(Modifier::ITALIC)

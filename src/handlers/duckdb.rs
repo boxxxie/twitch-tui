@@ -1,13 +1,13 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Sender},
+        mpsc::{self, Sender, SyncSender},
     },
     thread,
     time::Duration,
@@ -16,7 +16,6 @@ use std::{
 use chrono::{DateTime, Local};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::handlers::data::MessageData;
@@ -26,7 +25,6 @@ pub type SharedDuckDb = Rc<RefCell<DuckDbStore>>;
 static EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const DEFAULT_MAX_MESSAGES_PER_CHANNEL: usize = 150;
-const HYDRATE_TAIL_ROW_SCAN_LIMIT: usize = 2500;
 
 const DUCKDB_LOW_MEMORY_SQL: &str = "\
 SET threads=1;
@@ -53,6 +51,7 @@ CREATE TABLE IF NOT EXISTS messages (
     payload VARCHAR,
     raw_json VARCHAR
 );
+CREATE INDEX IF NOT EXISTS idx_messages_channel_epoch ON messages (channel, epoch_ms);
 CREATE TABLE IF NOT EXISTS events (
     id VARCHAR PRIMARY KEY,
     channel VARCHAR,
@@ -130,7 +129,12 @@ impl PersistedMessage {
 #[derive(Debug)]
 enum SqlWorkerMsg {
     Execute(String),
-    Shutdown(mpsc::SyncSender<()>),
+    QueryChannel {
+        channel: String,
+        limit: usize,
+        reply: SyncSender<VecDeque<MessageData>>,
+    },
+    Shutdown(SyncSender<()>),
 }
 
 #[derive(Debug)]
@@ -138,7 +142,6 @@ pub struct DuckDbStore {
     db_path: PathBuf,
     duckdb_bin: PathBuf,
     max_messages_per_channel: usize,
-    messages_by_channel: HashMap<String, VecDeque<MessageData>>,
     sql_tx: Option<Sender<SqlWorkerMsg>>,
 }
 
@@ -194,84 +197,11 @@ impl DuckDbStore {
             db_path,
             duckdb_bin,
             max_messages_per_channel: max_messages,
-            messages_by_channel: HashMap::new(),
             sql_tx: None,
         };
 
-        if store.db_path.exists() {
-            store.hydrate_from_disk();
-        } else {
-            let init_sql = format!("{DUCKDB_LOW_MEMORY_SQL}\n{SCHEMA_SQL}");
-            drop(
-                Command::new(&store.duckdb_bin)
-                    .env("MALLOC_ARENA_MAX", "1")
-                    .arg("-dark-mode")
-                    .arg("-batch")
-                    .arg(&store.db_path)
-                    .arg("-c")
-                    .arg(init_sql)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status(),
-            );
-        }
-
         store.start_persistent_worker();
         store
-    }
-
-    fn hydrate_from_disk(&mut self) {
-        let per_channel_limit = self.max_messages_per_channel;
-        let tail_scan_limit = HYDRATE_TAIL_ROW_SCAN_LIMIT.max(per_channel_limit.saturating_mul(10));
-        let query_sql = format!(
-            "{DUCKDB_LOW_MEMORY_SQL}
-            SELECT raw_json FROM (
-                SELECT raw_json, epoch_ms
-                FROM (
-                    SELECT raw_json, channel, epoch_ms
-                    FROM messages
-                    ORDER BY rowid DESC
-                    LIMIT {tail_scan_limit}
-                )
-                QUALIFY row_number() OVER (PARTITION BY channel ORDER BY epoch_ms DESC) <= {per_channel_limit}
-            ) ORDER BY epoch_ms ASC;"
-        );
-
-        let output = Command::new(&self.duckdb_bin)
-            .env("MALLOC_ARENA_MAX", "1")
-            .arg("-dark-mode")
-            .arg("-readonly")
-            .arg("-json")
-            .arg(&self.db_path)
-            .arg("-c")
-            .arg(query_sql)
-            .output();
-
-        let Ok(out) = output else {
-            return;
-        };
-        if !out.status.success() {
-            return;
-        }
-        let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&out.stdout) else {
-            return;
-        };
-
-        for row in rows {
-            let Some(raw_str) = row.get("raw_json").and_then(Value::as_str) else {
-                continue;
-            };
-            let Ok(persisted) = serde_json::from_str::<PersistedMessage>(raw_str) else {
-                continue;
-            };
-            let channel = persisted.channel.to_lowercase();
-            let msg = persisted.into_message_data();
-            let queue = self.messages_by_channel.entry(channel).or_default();
-            queue.push_front(msg);
-            if queue.len() > per_channel_limit {
-                queue.truncate(per_channel_limit);
-            }
-        }
     }
 
     fn start_persistent_worker(&mut self) {
@@ -279,6 +209,8 @@ impl DuckDbStore {
             .env("MALLOC_ARENA_MAX", "1")
             .arg("-dark-mode")
             .arg("-batch")
+            .arg("-list")
+            .arg("-noheader")
             .arg(&self.db_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -292,19 +224,9 @@ impl DuckDbStore {
         let Some(mut stdin): Option<ChildStdin> = child.stdin.take() else {
             return;
         };
-
-        if let Some(stdout) = child.stdout.take() {
-            thread::spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                let mut sink = String::new();
-                while let Ok(n) = reader.read_line(&mut sink) {
-                    if n == 0 {
-                        break;
-                    }
-                    sink.clear();
-                }
-            });
-        }
+        let Some(stdout): Option<ChildStdout> = child.stdout.take() else {
+            return;
+        };
 
         drop(writeln!(
             stdin,
@@ -314,10 +236,13 @@ impl DuckDbStore {
 
         let (sql_tx, sql_rx) = mpsc::channel::<SqlWorkerMsg>();
         let db_path_display = self.db_path.display().to_string();
-        info!("Initialized DuckDB message & event store at {db_path_display}");
+        info!("Initialized low-memory (8MB) on-demand DuckDB store at {db_path_display}");
 
         thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line_buf = String::new();
             let mut ack_on_exit = None;
+
             while let Ok(msg) = sql_rx.recv() {
                 match msg {
                     SqlWorkerMsg::Execute(sql) => {
@@ -325,6 +250,37 @@ impl DuckDbStore {
                             break;
                         }
                         drop(stdin.flush());
+                    }
+                    SqlWorkerMsg::QueryChannel {
+                        channel,
+                        limit,
+                        reply,
+                    } => {
+                        let clean_ch = sql_escape(&channel.to_lowercase());
+                        let query = format!(
+                            "SELECT coalesce(to_json(list(raw_json ORDER BY epoch_ms DESC)), '[]') FROM (SELECT raw_json, epoch_ms FROM messages WHERE channel = '{clean_ch}' ORDER BY epoch_ms DESC LIMIT {limit});"
+                        );
+                        if writeln!(stdin, "{query}").is_err() || stdin.flush().is_err() {
+                            let _ = reply.send(VecDeque::new());
+                            break;
+                        }
+
+                        line_buf.clear();
+                        let mut out = VecDeque::new();
+                        if reader.read_line(&mut line_buf).is_ok() {
+                            if let Ok(raw_list) =
+                                serde_json::from_str::<Vec<String>>(line_buf.trim())
+                            {
+                                for raw_str in raw_list {
+                                    if let Ok(persisted) =
+                                        serde_json::from_str::<PersistedMessage>(&raw_str)
+                                    {
+                                        out.push_back(persisted.into_message_data());
+                                    }
+                                }
+                            }
+                        }
+                        let _ = reply.send(out);
                     }
                     SqlWorkerMsg::Shutdown(ack) => {
                         drop(writeln!(stdin, "CHECKPOINT;"));
@@ -350,17 +306,8 @@ impl DuckDbStore {
         }
     }
 
-    pub fn record_message(&mut self, channel: &str, msg: &MessageData, max_messages: usize) {
+    pub fn record_message(&mut self, channel: &str, msg: &MessageData, _max_messages: usize) {
         let clean_channel = channel.to_lowercase();
-        let queue = self
-            .messages_by_channel
-            .entry(clean_channel.clone())
-            .or_default();
-        queue.push_front(msg.clone());
-        if queue.len() > max_messages {
-            queue.truncate(max_messages);
-        }
-
         let persisted = PersistedMessage::from_message_data(&clean_channel, msg);
         let raw_json = serde_json::to_string(&persisted).unwrap_or_default();
         let epoch_ms = persisted.time_sent.timestamp_millis();
@@ -429,14 +376,28 @@ impl DuckDbStore {
         self.execute_async(sql);
     }
 
-    /// Returns up to `limit` most recent messages for `channel`
-    /// ordered newest-first (`VecDeque` front = newest, matching `App::messages`).
+    /// Queries the persistent DuckDB worker on demand for up to `limit` most recent messages
+    /// for `channel` (ordered newest-first: `VecDeque` front = newest, matching `App::messages`).
     #[must_use]
     pub fn load_channel_messages(&self, channel: &str, limit: usize) -> VecDeque<MessageData> {
-        let clean_channel = channel.to_lowercase();
-        self.messages_by_channel
-            .get(&clean_channel)
-            .map_or_else(VecDeque::new, |q| q.iter().take(limit).cloned().collect())
+        let Some(tx) = &self.sql_tx else {
+            return VecDeque::new();
+        };
+        let effective_limit = limit.max(self.max_messages_per_channel);
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        if tx
+            .send(SqlWorkerMsg::QueryChannel {
+                channel: channel.to_lowercase(),
+                limit: effective_limit,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return VecDeque::new();
+        }
+        reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default()
     }
 
     pub fn shutdown(&mut self) {
@@ -488,5 +449,34 @@ mod tests {
         assert_eq!(restored.author, "boxxy_queen_of_b");
         assert_eq!(restored.payload, "hello duckdb");
         assert_eq!(restored.color.as_deref(), Some("#FF69B4"));
+    }
+
+    #[test]
+    fn test_on_demand_channel_query_under_8mb_limit() {
+        let tmp_db = std::env::temp_dir().join(format!("twt-test-{}.duckdb", std::process::id()));
+        drop(std::fs::remove_file(&tmp_db));
+
+        let mut store = DuckDbStore::with_max_messages(tmp_db.clone(), 50);
+        let msg = MessageData {
+            time_sent: Local::now(),
+            author: "alice".to_string(),
+            user_id: Some("1".to_string()),
+            system: false,
+            payload: "first message".to_string(),
+            emotes: vec![],
+            message_id: Some("m1".to_string()),
+            highlight: false,
+            badges: None,
+            color: Some("#00FF7F".to_string()),
+        };
+        store.record_message("besa", &msg, 50);
+
+        let loaded = store.load_channel_messages("besa", 50);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].author, "alice");
+        assert_eq!(loaded[0].payload, "first message");
+
+        store.shutdown();
+        drop(std::fs::remove_file(&tmp_db));
     }
 }

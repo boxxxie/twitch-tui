@@ -1,5 +1,7 @@
 use tui::style::Color::{self, Rgb};
 
+use crate::config::Theme;
+
 /// <https://css-tricks.com/converting-color-spaces-in-javascript/#hsl-to-rgb/>
 pub fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> [u8; 3] {
     // Color intensity
@@ -77,6 +79,65 @@ pub fn twitch_default_color(username: &str) -> Color {
     Rgb(r, g, b)
 }
 
+#[must_use]
+fn perceived_luminance(r: u8, g: u8, b: u8) -> f64 {
+    0.0722f64.mul_add(
+        f64::from(b),
+        0.2126f64.mul_add(f64::from(r), 0.7152 * f64::from(g)),
+    )
+}
+
+/// Ensures a username RGB color has sufficient contrast against the terminal background.
+/// - On dark themes: black / near-black / dark gray colors are changed to white (`#F0F4F8`),
+///   and dark chromatic colors (e.g. `#0000FF` pure blue or `#220044` dark purple) are lightened
+///   toward white until they are easily readable.
+/// - On light themes: white / near-white colors are changed to dark slate (`#1E293B`), and overly
+///   bright colors are darkened for contrast.
+#[must_use]
+pub fn ensure_readable_color(color: Color, theme: &Theme) -> Color {
+    let Rgb(r, g, b) = color else {
+        return color;
+    };
+
+    let max_c = r.max(g).max(b);
+    let min_c = r.min(g).min(b);
+    let chroma = max_c.saturating_sub(min_c);
+    let lum = perceived_luminance(r, g, b);
+
+    match theme {
+        Theme::Dark => {
+            // Black, near-black, or dark achromatic gray -> clean white
+            if max_c < 55 || (chroma < 24 && lum < 90.0) {
+                return Rgb(0xF0, 0xF4, 0xF8);
+            }
+            // Dark chromatic color (like #0000FF blue, #1A0033 dark purple, #330000 dark red)
+            let min_lum = 95.0;
+            if lum < min_lum {
+                // Blend proportionally toward white so hue stays recognizable
+                let t = ((min_lum - lum) / (255.0 - lum)).clamp(0.25, 0.75);
+                let lift = |c: u8| -> u8 {
+                    let cf = f64::from(c);
+                    cf.mul_add(1.0 - t, 255.0 * t).round() as u8
+                };
+                return Rgb(lift(r), lift(g), lift(b));
+            }
+            Rgb(r, g, b)
+        }
+        Theme::Light => {
+            if min_c > 205 || (chroma < 24 && lum > 180.0) {
+                return Rgb(0x1E, 0x29, 0x3B);
+            }
+            let max_lum = 165.0;
+            if lum > max_lum {
+                let scale = (max_lum / lum).clamp(0.35, 0.85);
+                let darken = |c: u8| -> u8 { (f64::from(c) * scale).round() as u8 };
+                return Rgb(darken(r), darken(g), darken(b));
+            }
+            Rgb(r, g, b)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +168,27 @@ mod tests {
         let rgb = u32_to_color(126_496_416);
 
         assert_eq!(Rgb(138, 46, 160), rgb);
+    }
+
+    #[test]
+    fn test_ensure_readable_color_dark_theme() {
+        // Pure black and near-black become white
+        assert_eq!(
+            ensure_readable_color(Rgb(0, 0, 0), &Theme::Dark),
+            Rgb(0xF0, 0xF4, 0xF8)
+        );
+        assert_eq!(
+            ensure_readable_color(Rgb(20, 20, 25), &Theme::Dark),
+            Rgb(0xF0, 0xF4, 0xF8)
+        );
+
+        // Pure dark blue (#0000FF, luminance ~18.4) gets lightened to a readable blue
+        let readable_blue = ensure_readable_color(Rgb(0, 0, 255), &Theme::Dark);
+        let Rgb(r, g, b) = readable_blue else {
+            panic!("Expected Rgb");
+        };
+        assert!(perceived_luminance(r, g, b) >= 90.0);
+        assert_eq!(b, 255);
+        assert!(r > 60 && g > 60);
     }
 }
